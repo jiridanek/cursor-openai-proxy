@@ -21,6 +21,7 @@ export type CliOptions = {
   sessionMode: SessionMode;
   agentMode: AgentMode;
   cursorApiKey: string | undefined;
+  help: boolean;
 };
 
 const SESSION_MODES = new Set<SessionMode>(["sticky", "prefix"]);
@@ -37,6 +38,7 @@ export function parseArgs(
     sessionMode: "sticky",
     agentMode: "ask",
     cursorApiKey: env.CURSOR_API_KEY?.trim() || undefined,
+    help: false,
   };
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -84,7 +86,7 @@ export function parseArgs(
       }
       case "--help":
       case "-h":
-        opts.port = -1;
+        opts.help = true;
         break;
       default:
         if (arg.startsWith("-")) {

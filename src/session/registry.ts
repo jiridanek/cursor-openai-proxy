@@ -4,28 +4,20 @@ export class Mutex {
   #locked = false;
   #queue: Array<() => void> = [];
 
-  async acquire(): Promise<void> {
-    if (!this.#locked) {
-      this.#locked = true;
-      return;
-    }
-    await new Promise<void>((resolve) => {
-      this.#queue.push(resolve);
-    });
-  }
-
-  release(): void {
-    const next = this.#queue.shift();
-    if (next) next();
-    else this.#locked = false;
-  }
-
   async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
-    await this.acquire();
+    if (this.#locked) {
+      await new Promise<void>((resolve) => {
+        this.#queue.push(resolve);
+      });
+    } else {
+      this.#locked = true;
+    }
     try {
       return await fn();
     } finally {
-      this.release();
+      const next = this.#queue.shift();
+      if (next) next();
+      else this.#locked = false;
     }
   }
 }
@@ -48,7 +40,6 @@ export type SessionRecord = {
   createdAt: number;
   previousResponseId: string | null;
   stored: boolean;
-  kind: "chat" | "response";
   usage?: TokenUsage;
 };
 
@@ -70,13 +61,7 @@ export class SessionRegistry {
   }
 
   set(record: SessionRecord): void {
-    this.#byKey.set(sessionKey(record.callerKeyHash, record.id), record);
-    let hashes = this.#ids.get(record.id);
-    if (!hashes) {
-      hashes = new Set();
-      this.#ids.set(record.id, hashes);
-    }
-    hashes.add(record.callerKeyHash);
+    this.alias(record.callerKeyHash, record.id, record);
   }
 
   alias(callerKeyHash: string, id: string, record: SessionRecord): void {
@@ -91,21 +76,5 @@ export class SessionRegistry {
 
   all(): SessionRecord[] {
     return [...new Set(this.#byKey.values())];
-  }
-
-  delete(callerKeyHash: string, id: string): void {
-    this.#byKey.delete(sessionKey(callerKeyHash, id));
-    const hashes = this.#ids.get(id);
-    if (!hashes) return;
-    hashes.delete(callerKeyHash);
-    if (hashes.size === 0) this.#ids.delete(id);
-  }
-
-  async dispose(record: SessionRecord): Promise<void> {
-    try {
-      await record.agent.close();
-    } catch {
-      // ignore dispose errors
-    }
   }
 }

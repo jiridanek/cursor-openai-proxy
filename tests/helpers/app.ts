@@ -5,15 +5,19 @@ import { FakeCursorBackend } from "./fakeBackend.ts";
 
 export const HOSTED_KEY = "crsr_test_hosted_key";
 
+const DEFAULTS = {
+  host: "127.0.0.1",
+  port: 0,
+  workspace: "/tmp/workspace",
+  sessionMode: "sticky",
+  agentMode: "ask",
+} as const;
+
 export function hostedConfig(
   overrides: Partial<ProxyConfig> = {},
 ): ProxyConfig {
   return {
-    host: "127.0.0.1",
-    port: 0,
-    workspace: "/tmp/workspace",
-    sessionMode: "sticky",
-    agentMode: "ask",
+    ...DEFAULTS,
     auth: { mode: "hosted", cursorApiKey: HOSTED_KEY },
     ...overrides,
   };
@@ -22,15 +26,7 @@ export function hostedConfig(
 export function passthroughConfig(
   overrides: Partial<ProxyConfig> = {},
 ): ProxyConfig {
-  return {
-    host: "127.0.0.1",
-    port: 0,
-    workspace: "/tmp/workspace",
-    sessionMode: "sticky",
-    agentMode: "ask",
-    auth: { mode: "passthrough" },
-    ...overrides,
-  };
+  return hostedConfig({ auth: { mode: "passthrough" }, ...overrides });
 }
 
 export function makeApp(
@@ -49,6 +45,30 @@ export function authHeaders(
     "Content-Type": "application/json",
     ...extra,
   };
+}
+
+export function postJson(
+  app: ReturnType<typeof createApp>["app"],
+  path: string,
+  body: unknown,
+  extra: Record<string, string> = {},
+  apiKey = "ollama",
+) {
+  return app.request(path, {
+    method: "POST",
+    headers: authHeaders(apiKey, extra),
+    body: JSON.stringify(body),
+  });
+}
+
+export function normalizeSse(
+  raw: string,
+  replacements: Array<readonly [RegExp, string]>,
+): string {
+  return replacements.reduce(
+    (text, [pattern, value]) => text.replaceAll(pattern, value),
+    raw,
+  );
 }
 
 export async function jsonOf<T>(res: Response): Promise<T> {

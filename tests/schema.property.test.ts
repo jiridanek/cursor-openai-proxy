@@ -4,7 +4,7 @@ import { HttpError } from "../src/http/errors.ts";
 import { ChatCompletion, ChatCompletionRequest } from "../src/http/schemas.ts";
 import { flattenMessages, toChatCompletion } from "../src/mapping.ts";
 import { FakeCursorBackend } from "./helpers/fakeBackend.ts";
-import { authHeaders, jsonOf, makeApp } from "./helpers/app.ts";
+import { jsonOf, makeApp, postJson } from "./helpers/app.ts";
 
 const ChatRequestArb = Arbitrary.make(ChatCompletionRequest);
 
@@ -41,19 +41,11 @@ describe("schema property tests", () => {
         async (followUp) => {
           const backend = new FakeCursorBackend({ reply: "ok" });
           const { app } = makeApp(backend);
-          const first = await app.request("/v1/responses", {
-            method: "POST",
-            headers: authHeaders(),
-            body: JSON.stringify({ input: "start" }),
-          });
+          const first = await postJson(app, "/v1/responses", { input: "start" });
           const created = await jsonOf<{ id: string }>(first);
-          await app.request("/v1/responses", {
-            method: "POST",
-            headers: authHeaders(),
-            body: JSON.stringify({
-              input: followUp,
-              previous_response_id: created.id,
-            }),
+          await postJson(app, "/v1/responses", {
+            input: followUp,
+            previous_response_id: created.id,
           });
           expect(backend.sends).toHaveLength(2);
           expect(backend.sends[1]?.prompt).toBe(followUp);

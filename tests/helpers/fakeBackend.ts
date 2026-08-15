@@ -24,7 +24,6 @@ export class FakeCursorBackend implements CursorBackend {
   models: ModelListItem[] = [
     {
       id: "composer-2.5",
-      displayName: "Composer 2.5",
       aliases: ["composer", "auto"],
       parameters: [
         { id: "effort", values: [{ value: "low" }, { value: "high" }] },

@@ -2,7 +2,6 @@ import type { AgentMode } from "../config.ts";
 
 export type ModelListItem = {
   id: string;
-  displayName?: string;
   aliases?: string[];
   parameters?: Array<{
     id: string;
@@ -20,7 +19,6 @@ export type RunOutcome = {
   status: "finished" | "error" | "cancelled";
   result?: string;
   usage?: TokenUsage;
-  error?: { message: string };
 };
 
 export type RunHandle = {

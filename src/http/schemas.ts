@@ -90,19 +90,3 @@ export const ChatCompletion = Schema.Struct({
   }),
 });
 export type ChatCompletion = Schema.Schema.Type<typeof ChatCompletion>;
-
-export const ResponseObject = Schema.Struct({
-  id: Schema.String,
-  object: Schema.Literal("response"),
-  status: Schema.String,
-  model: Schema.String,
-  created_at: Schema.Number,
-  previous_response_id: Schema.NullOr(Schema.String),
-  output: Schema.Array(Schema.Unknown),
-  usage: Schema.Struct({
-    input_tokens: Schema.Number,
-    output_tokens: Schema.Number,
-    total_tokens: Schema.Number,
-  }),
-});
-export type ResponseObject = Schema.Schema.Type<typeof ResponseObject>;

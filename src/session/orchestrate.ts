@@ -12,7 +12,6 @@ import {
   lastUserText,
   nextPrefixSessionId,
   prefixSessionId,
-  withInstructions,
 } from "../mapping.ts";
 import {
   Mutex,
@@ -29,12 +28,13 @@ async function createAgentRecord(opts: {
   apiKey: string;
   model: string;
   id: string;
-  kind: "chat" | "response";
   stored: boolean;
   previousResponseId?: string | null;
   effort?: string;
 }): Promise<SessionRecord> {
-  const catalog = await opts.backend.listModels(opts.apiKey).catch(() => []);
+  const catalog = opts.effort
+    ? await opts.backend.listModels(opts.apiKey)
+    : [];
   const agent = await opts.backend.createAgent({
     apiKey: opts.apiKey,
     model: opts.model,
@@ -53,7 +53,6 @@ async function createAgentRecord(opts: {
     createdAt: nowSeconds(),
     previousResponseId: opts.previousResponseId ?? null,
     stored: opts.stored,
-    kind: opts.kind,
   };
 }
 
@@ -70,7 +69,6 @@ export async function createChatSession(opts: {
   const record = await createAgentRecord({
     ...opts,
     id: opts.id ?? newId("sess_"),
-    kind: "chat",
     stored: true,
   });
   opts.registry.set(record);
@@ -94,33 +92,34 @@ export async function resolveChatSession(opts: {
     opts.headers.sessionId;
   const effort = opts.body.reasoning_effort;
 
-  if (opts.config.sessionMode === "prefix") {
-    const prefix = opts.body.messages.slice(0, -1);
-    if (prefix.length > 0) {
-      const id = prefixSessionId(
-        opts.body.messages,
-        opts.model,
-        opts.config.workspace,
-      );
-      const existing = opts.registry.get(opts.callerKeyHash, id);
-      if (existing) {
-        return { record: existing, prompt: lastUserText(opts.body.messages) };
-      }
-    }
-    const record = await createChatSession({ ...opts, effort });
-    return { record, prompt: flattenMessages(opts.body.messages) };
-  }
+  const lookupId =
+    opts.config.sessionMode === "prefix"
+      ? opts.body.messages.length > 1
+        ? prefixSessionId(
+            opts.body.messages,
+            opts.model,
+            opts.config.workspace,
+          )
+        : undefined
+      : stickyId;
 
-  if (stickyId) {
-    const existing = opts.registry.get(opts.callerKeyHash, stickyId);
+  if (lookupId) {
+    const existing = opts.registry.get(opts.callerKeyHash, lookupId);
     if (existing) {
       return { record: existing, prompt: lastUserText(opts.body.messages) };
     }
-    const record = await createChatSession({ ...opts, id: stickyId, effort });
-    return { record, prompt: flattenMessages(opts.body.messages) };
   }
 
-  const record = await createChatSession({ ...opts, effort });
+  const record = await createChatSession({
+    backend: opts.backend,
+    registry: opts.registry,
+    config: opts.config,
+    callerKeyHash: opts.callerKeyHash,
+    apiKey: opts.apiKey,
+    model: opts.model,
+    effort,
+    id: opts.config.sessionMode === "sticky" ? stickyId : undefined,
+  });
   return { record, prompt: flattenMessages(opts.body.messages) };
 }
 
@@ -182,8 +181,8 @@ export async function resolveResponseSession(opts: {
       previousResponseId: opts.body.previous_response_id,
       status: "in_progress",
       outputText: "",
+      usage: undefined,
       createdAt: opts.createdAt,
-      kind: "response",
       stored: opts.store,
       activeRun: undefined,
     };
@@ -198,7 +197,6 @@ export async function resolveResponseSession(opts: {
     apiKey: opts.apiKey,
     model: opts.model,
     id: opts.responseId,
-    kind: "response",
     stored: opts.store,
     previousResponseId: null,
     effort,
@@ -207,7 +205,9 @@ export async function resolveResponseSession(opts: {
   if (opts.store) opts.registry.set(record);
   return {
     record,
-    prompt: withInstructions(opts.inputText, opts.body.instructions, true),
+    prompt: opts.body.instructions
+      ? `system: ${opts.body.instructions}\n${opts.inputText}`
+      : opts.inputText,
   };
 }
 
@@ -244,20 +244,16 @@ export async function runSession(
     const run: RunHandle = await record.agent.send(prompt);
     record.activeRun = run;
     record.status = "in_progress";
+    record.outputText = "";
     try {
       if (onDelta) {
-        const chunks: string[] = [];
         for await (const delta of run.streamText()) {
-          chunks.push(delta);
-          record.outputText = chunks.join("");
+          record.outputText += delta;
           await onDelta(delta);
         }
-        const outcome = await run.wait();
-        applyOutcome(record, outcome, chunks.join(""));
-      } else {
-        const outcome = await run.wait();
-        applyOutcome(record, outcome, outcome.result ?? "");
       }
+      const outcome = await run.wait();
+      applyOutcome(record, outcome, record.outputText);
       return record.outputText;
     } finally {
       record.activeRun = undefined;

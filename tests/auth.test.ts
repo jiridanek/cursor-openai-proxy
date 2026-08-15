@@ -7,6 +7,7 @@ import {
   jsonOf,
   makeApp,
   passthroughConfig,
+  postJson,
 } from "./helpers/app.ts";
 
 describe("auth", () => {
@@ -47,20 +48,21 @@ describe("auth", () => {
   it("isolates sessions by caller key in hosted-key mode", async () => {
     const backend = new FakeCursorBackend();
     const { app } = makeApp(backend, hostedConfig());
-    const first = await app.request("/v1/responses", {
-      method: "POST",
-      headers: authHeaders("tenant-a"),
-      body: JSON.stringify({ input: "hello" }),
-    });
+    const first = await postJson(
+      app,
+      "/v1/responses",
+      { input: "hello" },
+      {},
+      "tenant-a",
+    );
     const created = await jsonOf<{ id: string }>(first);
-    const other = await app.request("/v1/responses", {
-      method: "POST",
-      headers: authHeaders("tenant-b"),
-      body: JSON.stringify({
-        input: "follow",
-        previous_response_id: created.id,
-      }),
-    });
+    const other = await postJson(
+      app,
+      "/v1/responses",
+      { input: "follow", previous_response_id: created.id },
+      {},
+      "tenant-b",
+    );
     expect(other.status).toBe(404);
     const get = await app.request(`/v1/responses/${created.id}`, {
       headers: authHeaders("tenant-b"),

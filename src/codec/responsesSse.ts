@@ -1,17 +1,16 @@
-export type ResponsesSseEvent = {
-  event: string;
-  data: unknown;
-};
-
-export function responseCreatedEvent(response: unknown): ResponsesSseEvent {
-  return { event: "response.created", data: response };
-}
-
 export function responseOutputTextDeltaEvent(opts: {
   responseId: string;
   delta: string;
   outputIndex?: number;
-}): ResponsesSseEvent {
+}): {
+  event: string;
+  data: {
+    type: "response.output_text.delta";
+    item_id: string;
+    output_index: number;
+    delta: string;
+  };
+} {
   return {
     event: "response.output_text.delta",
     data: {
@@ -21,12 +20,4 @@ export function responseOutputTextDeltaEvent(opts: {
       delta: opts.delta,
     },
   };
-}
-
-export function responseCompletedEvent(response: unknown): ResponsesSseEvent {
-  return { event: "response.completed", data: response };
-}
-
-export function formatResponsesSse(event: ResponsesSseEvent): string {
-  return `event: ${event.event}\ndata: ${JSON.stringify(event.data)}\n\n`;
 }

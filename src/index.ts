@@ -13,7 +13,7 @@ function main(argv: string[]): void {
     process.exitCode = 1;
     return;
   }
-  if (opts.port < 0) {
+  if (opts.help) {
     console.log(USAGE);
     return;
   }

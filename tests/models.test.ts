@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { FakeCursorBackend } from "./helpers/fakeBackend.ts";
-import { authHeaders, jsonOf, makeApp } from "./helpers/app.ts";
+import { authHeaders, jsonOf, makeApp, postJson } from "./helpers/app.ts";
 
 describe("GET /v1/models", () => {
   it("lists catalog ids and aliases", async () => {
@@ -44,10 +44,9 @@ describe("GET /v1/models", () => {
 describe("unsupported routes", () => {
   it("returns 501 for embeddings", async () => {
     const { app } = makeApp();
-    const res = await app.request("/v1/embeddings", {
-      method: "POST",
-      headers: authHeaders(),
-      body: JSON.stringify({ model: "text-embedding-3-small", input: "hi" }),
+    const res = await postJson(app, "/v1/embeddings", {
+      model: "text-embedding-3-small",
+      input: "hi",
     });
     expect(res.status).toBe(501);
   });

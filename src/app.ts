@@ -8,11 +8,8 @@ import {
   completionsDeltaChunk,
   completionsStopChunk,
 } from "./codec/chatSse.ts";
-import {
-  responseCompletedEvent,
-  responseCreatedEvent,
-  responseOutputTextDeltaEvent,
-} from "./codec/responsesSse.ts";
+import { responseOutputTextDeltaEvent } from "./codec/responsesSse.ts";
+import { writeDone, writeJsonSse } from "./codec/sse.ts";
 import type { CursorBackend } from "./cursor/backend.ts";
 import { authenticate } from "./http/auth.ts";
 import { HttpError, notImplemented, openaiErrorBody } from "./http/errors.ts";
@@ -42,6 +39,7 @@ import {
   resolveResponseSession,
   runSession,
   SessionRegistry,
+  type SessionRecord,
 } from "./session/orchestrate.ts";
 
 type Variables = {
@@ -51,6 +49,36 @@ type Variables = {
 
 function modelId(value: string | undefined): string {
   return value?.trim() || DEFAULT_MODEL;
+}
+
+function prepareGeneration(
+  body: {
+    model?: string;
+    n?: number;
+    tools?: unknown;
+    logprobs?: unknown;
+  },
+  options: { n?: boolean } = {},
+): string {
+  logIgnoredSampling(body);
+  if (options.n) requireSingleChoice(body.n);
+  rejectToolsAndLogprobs(body);
+  return modelId(body.model);
+}
+
+function responseFromRecord(
+  record: SessionRecord,
+  extra?: { id?: string; text?: string; status?: string; createdAt?: number },
+) {
+  return toResponseObject({
+    id: extra?.id ?? record.id,
+    model: record.model,
+    text: extra?.text ?? record.outputText,
+    status: extra?.status ?? record.status,
+    previousResponseId: record.previousResponseId,
+    createdAt: extra?.createdAt ?? record.createdAt,
+    usage: record.usage,
+  });
 }
 
 export function createApp(config: ProxyConfig, backend: CursorBackend) {
@@ -112,10 +140,7 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
 
   app.post("/v1/chat/completions", async (c) => {
     const body = await decodeJson(c, ChatCompletionRequest);
-    logIgnoredSampling(body as Record<string, unknown>);
-    requireSingleChoice(body.n);
-    rejectToolsAndLogprobs(body);
-    const model = modelId(body.model);
+    const model = prepareGeneration(body, { n: true });
     const callerKeyHash = c.get("callerKeyHash");
     const created = nowSeconds();
     const completionId = newId("chatcmpl_");
@@ -136,15 +161,12 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
 
     if (body.stream) {
       return streamSSE(c, async (stream) => {
-        await stream.writeSSE({
-          data: JSON.stringify(chatRoleChunk(completionId, created, model)),
-        });
+        await writeJsonSse(stream, chatRoleChunk(completionId, created, model));
         const text = await runSession(record, prompt, async (delta) => {
-          await stream.writeSSE({
-            data: JSON.stringify(
-              chatDeltaChunk(completionId, created, model, delta),
-            ),
-          });
+          await writeJsonSse(
+            stream,
+            chatDeltaChunk(completionId, created, model, delta),
+          );
         });
         aliasPrefixSession(
           config,
@@ -155,10 +177,8 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
           record,
           text,
         );
-        await stream.writeSSE({
-          data: JSON.stringify(chatStopChunk(completionId, created, model)),
-        });
-        await stream.writeSSE({ data: "[DONE]" });
+        await writeJsonSse(stream, chatStopChunk(completionId, created, model));
+        await writeDone(stream);
       });
     }
 
@@ -185,10 +205,7 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
 
   app.post("/v1/completions", async (c) => {
     const body = await decodeJson(c, CompletionsRequest);
-    logIgnoredSampling(body as Record<string, unknown>);
-    requireSingleChoice(body.n);
-    rejectToolsAndLogprobs(body);
-    const model = modelId(body.model);
+    const model = prepareGeneration(body, { n: true });
     const prompt =
       typeof body.prompt === "string" ? body.prompt : body.prompt.join("");
     const created = nowSeconds();
@@ -205,18 +222,16 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
     if (body.stream) {
       return streamSSE(c, async (stream) => {
         await runSession(record, prompt, async (delta) => {
-          await stream.writeSSE({
-            data: JSON.stringify(
-              completionsDeltaChunk(completionId, created, model, delta),
-            ),
-          });
+          await writeJsonSse(
+            stream,
+            completionsDeltaChunk(completionId, created, model, delta),
+          );
         });
-        await stream.writeSSE({
-          data: JSON.stringify(
-            completionsStopChunk(completionId, created, model),
-          ),
-        });
-        await stream.writeSSE({ data: "[DONE]" });
+        await writeJsonSse(
+          stream,
+          completionsStopChunk(completionId, created, model),
+        );
+        await writeDone(stream);
       });
     }
 
@@ -234,9 +249,7 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
 
   app.post("/v1/responses", async (c) => {
     const body = await decodeJson(c, ResponsesRequest);
-    logIgnoredSampling(body as Record<string, unknown>);
-    rejectToolsAndLogprobs(body);
-    const model = modelId(body.model);
+    const model = prepareGeneration(body);
     const callerKeyHash = c.get("callerKeyHash");
     const store = body.store !== false;
     const createdAt = nowSeconds();
@@ -256,57 +269,33 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
       createdAt,
     });
 
-    const skeleton = toResponseObject({
-      id: responseId,
-      model,
-      text: "",
-      status: "in_progress",
-      previousResponseId: body.previous_response_id ?? null,
-      createdAt,
-    });
-
     if (body.stream) {
       return streamSSE(c, async (stream) => {
-        const created = responseCreatedEvent(skeleton);
-        await stream.writeSSE({
-          event: created.event,
-          data: JSON.stringify(created.data),
-        });
+        await writeJsonSse(
+          stream,
+          responseFromRecord(record, {
+            id: responseId,
+            text: "",
+            status: "in_progress",
+            createdAt,
+          }),
+          "response.created",
+        );
         const text = await runSession(record, prompt, async (delta) => {
           const event = responseOutputTextDeltaEvent({ responseId, delta });
-          await stream.writeSSE({
-            event: event.event,
-            data: JSON.stringify(event.data),
-          });
+          await writeJsonSse(stream, event.data, event.event);
         });
-        const completed = toResponseObject({
-          id: responseId,
-          model,
-          text,
-          status: record.status === "cancelled" ? "cancelled" : "completed",
-          previousResponseId: body.previous_response_id ?? null,
-          createdAt,
-          usage: record.usage,
-        });
-        const done = responseCompletedEvent(completed);
-        await stream.writeSSE({
-          event: done.event,
-          data: JSON.stringify(done.data),
-        });
+        await writeJsonSse(
+          stream,
+          responseFromRecord(record, { id: responseId, text, createdAt }),
+          "response.completed",
+        );
       });
     }
 
     const text = await runSession(record, prompt);
     return c.json(
-      toResponseObject({
-        id: responseId,
-        model,
-        text,
-        status: record.status === "cancelled" ? "cancelled" : "completed",
-        previousResponseId: body.previous_response_id ?? null,
-        createdAt,
-        usage: record.usage,
-      }),
+      responseFromRecord(record, { id: responseId, text, createdAt }),
     );
   });
 
@@ -316,17 +305,7 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
       c.get("callerKeyHash"),
       c.req.param("response_id"),
     );
-    return c.json(
-      toResponseObject({
-        id: record.id,
-        model: record.model,
-        text: record.outputText,
-        status: statusOf(record.status),
-        previousResponseId: record.previousResponseId,
-        createdAt: record.createdAt,
-        usage: record.usage,
-      }),
-    );
+    return c.json(responseFromRecord(record));
   });
 
   app.post("/v1/responses/:response_id/cancel", async (c) => {
@@ -348,26 +327,8 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
     await record.activeRun.cancel();
     record.activeRun = undefined;
     record.status = "cancelled";
-    return c.json(
-      toResponseObject({
-        id: record.id,
-        model: record.model,
-        text: record.outputText,
-        status: "cancelled",
-        previousResponseId: record.previousResponseId,
-        createdAt: record.createdAt,
-      }),
-    );
+    return c.json(responseFromRecord(record));
   });
 
   return { app, registry };
-}
-
-function statusOf(
-  status: "in_progress" | "completed" | "cancelled" | "failed",
-): string {
-  if (status === "completed") return "completed";
-  if (status === "cancelled") return "cancelled";
-  if (status === "failed") return "failed";
-  return "in_progress";
 }

@@ -45,12 +45,6 @@ export function chatStopChunk(id: string, created: number, model: string): ChatC
   };
 }
 
-export function formatChatSse(chunk: ChatChunk): string {
-  return `data: ${JSON.stringify(chunk)}\n\n`;
-}
-
-export const CHAT_DONE = "data: [DONE]\n\n";
-
 export type CompletionsChunk = {
   id: string;
   object: "text_completion";

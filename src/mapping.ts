@@ -14,9 +14,10 @@ const IGNORED_SAMPLING = [
   "max_completion_tokens",
 ] as const;
 
-export function logIgnoredSampling(body: Record<string, unknown>): void {
+export function logIgnoredSampling(body: object): void {
   if (!process.env.DEBUG) return;
-  const present = IGNORED_SAMPLING.filter((key) => body[key] !== undefined);
+  const rec = body as Record<string, unknown>;
+  const present = IGNORED_SAMPLING.filter((key) => rec[key] !== undefined);
   if (present.length > 0) {
     console.debug(
       `cursor-openai-proxy: ignoring sampling knobs: ${present.join(", ")}`,
@@ -42,7 +43,7 @@ export function rejectToolsAndLogprobs(body: {
   }
 }
 
-function isVisionPart(part: { type?: string; image_url?: unknown }): boolean {
+function isVisionPart(part: { type?: unknown; image_url?: unknown }): boolean {
   return (
     part.image_url !== undefined ||
     part.type === "image_url" ||
@@ -98,16 +99,16 @@ export function flattenResponsesInput(
       throw notImplemented("Non-text input items");
     }
     const rec = item as Record<string, unknown>;
-    const type = rec.type;
-    if (type === "input_image" || type === "image_url") {
+    if (isVisionPart(rec)) {
       throw notImplemented("Vision / image inputs");
     }
+    const type = rec.type;
     if (type === "input_text" && typeof rec.text === "string") {
       parts.push(rec.text);
       continue;
     }
     if (type === "message" || typeof rec.role === "string") {
-      parts.push(flattenContent(rec.content as never));
+      parts.push(flattenContent(rec.content as ChatMessage["content"]));
       continue;
     }
     if (typeof rec.text === "string") {
@@ -119,15 +120,6 @@ export function flattenResponsesInput(
     );
   }
   return parts.join("\n");
-}
-
-export function withInstructions(
-  prompt: string,
-  instructions: string | undefined,
-  firstTurn: boolean,
-): string {
-  if (!firstTurn || !instructions) return prompt;
-  return `system: ${instructions}\n${prompt}`;
 }
 
 function hashPrefix(
@@ -236,8 +228,6 @@ export function toResponseObject(opts: {
   usage?: TokenUsage;
   createdAt?: number;
 }) {
-  const messageStatus =
-    opts.status === "completed" ? "completed" : opts.status;
   return {
     id: opts.id,
     object: "response" as const,
@@ -250,7 +240,7 @@ export function toResponseObject(opts: {
         type: "message" as const,
         id: newId("msg_"),
         role: "assistant" as const,
-        status: messageStatus,
+        status: opts.status,
         content: [{ type: "output_text" as const, text: opts.text }],
       },
     ],

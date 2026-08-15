@@ -35,7 +35,6 @@ function wrapRun(run: SdkRun): RunHandle {
               totalTokens: result.usage.totalTokens,
             }
           : undefined,
-        error: result.error,
       };
     },
     async cancel() {
@@ -60,18 +59,38 @@ function wrapAgent(agent: SdkAgent): AgentHandle {
   };
 }
 
+const CATALOG_TTL_MS = 60_000;
+
 export class SdkCursorBackend implements CursorBackend {
+  #catalog = new Map<string, { expires: number; models: ModelListItem[] }>();
+  #inflight = new Map<string, Promise<ModelListItem[]>>();
+
   async listModels(apiKey: string): Promise<ModelListItem[]> {
-    const models = await Cursor.models.list({ apiKey });
-    return models.map((model) => ({
-      id: model.id,
-      displayName: model.displayName,
-      aliases: model.aliases,
-      parameters: model.parameters?.map((parameter) => ({
-        id: parameter.id,
-        values: parameter.values.map((value) => ({ value: value.value })),
-      })),
-    }));
+    const cached = this.#catalog.get(apiKey);
+    if (cached && cached.expires > Date.now()) return cached.models;
+    const pending = this.#inflight.get(apiKey);
+    if (pending) return pending;
+    const load = Cursor.models.list({ apiKey })
+      .then((models) => {
+        const mapped: ModelListItem[] = models.map((model) => ({
+          id: model.id,
+          aliases: model.aliases,
+          parameters: model.parameters?.map((parameter) => ({
+            id: parameter.id,
+            values: parameter.values.map((value) => ({ value: value.value })),
+          })),
+        }));
+        this.#catalog.set(apiKey, {
+          expires: Date.now() + CATALOG_TTL_MS,
+          models: mapped,
+        });
+        return mapped;
+      })
+      .finally(() => {
+        this.#inflight.delete(apiKey);
+      });
+    this.#inflight.set(apiKey, load);
+    return load;
   }
 
   async createAgent(options: CreateAgentOptions): Promise<AgentHandle> {
