@@ -29,6 +29,12 @@ export type FakeOptions = {
   hangUntilCancel?: boolean;
   runError?: { message: string };
   toolCall?: FakeToolCall;
+  /**
+   * When set, each successive `send()` on the fake agent pops the next entry
+   * instead of reusing `toolCall`. Lets a test drive multiple independent
+   * tool-calling rounds (each its own run/supervisor) on one sticky session.
+   */
+  toolCallSequence?: FakeToolCall[];
 };
 
 export class FakeCursorBackend implements CursorBackend {
@@ -73,7 +79,11 @@ export class FakeCursorBackend implements CursorBackend {
             ? Object.keys(sendOptions.customTools)
             : undefined,
         });
-        return new FakeRun(prompt, backend.options, sendOptions?.customTools);
+        const sequence = backend.options.toolCallSequence;
+        const options = sequence
+          ? { ...backend.options, toolCall: sequence[backend.sends.length - 1] }
+          : backend.options;
+        return new FakeRun(prompt, options, sendOptions?.customTools);
       },
       async close() {
         backend.closed.push(agentId);

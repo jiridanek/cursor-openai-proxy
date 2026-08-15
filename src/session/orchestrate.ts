@@ -147,12 +147,22 @@ export async function resolveChatSession(opts: {
     const existing = opts.registry.get(opts.callerKeyHash, lookupId);
     if (existing) {
       if (existing.status === "requires_action") {
-        if (toolOutputs.length === 0) {
+        const pendingIds = new Set(
+          (existing.pendingToolCalls ?? []).map((call) => call.callId),
+        );
+        const relevantOutputs = toolOutputs.filter((output) =>
+          pendingIds.has(output.callId),
+        );
+        if (relevantOutputs.length === 0) {
           throw new HttpError(409, "Session is waiting for tool outputs", {
             code: "requires_action",
           });
         }
-        return { record: existing, prompt: "", resume: { outputs: toolOutputs } };
+        return {
+          record: existing,
+          prompt: "",
+          resume: { outputs: relevantOutputs },
+        };
       }
       return { record: existing, prompt: lastUserText(opts.body.messages) };
     }

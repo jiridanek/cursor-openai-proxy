@@ -128,6 +128,90 @@ describe("OpenAI tool pass-through", () => {
     expect(backend.sends).toHaveLength(1);
   });
 
+  it("resumes a second tool-calling round in the same sticky session", async () => {
+    // Real OpenAI clients resend the *entire* message history on every
+    // request. By the time round 2's tool output comes back, `messages`
+    // contains both the already-resolved round-1 tool message (call_1) and
+    // the new round-2 one (call_2). Before the orchestrate.ts fix,
+    // toolOutputsFromMessages() returned both, and resumeParked() 400'd on
+    // the stale call_1 (no longer parked in round 2's fresh supervisor)
+    // before ever looking at call_2.
+    const backend = new FakeCursorBackend({
+      toolCallSequence: [
+        { name: "add", arguments: { a: 3, b: 4 }, id: "call_1", finalReply: (o) => `sum=${o}` },
+        { name: "add", arguments: { a: 5, b: 6 }, id: "call_2", finalReply: (o) => `sum2=${o}` },
+      ],
+    });
+    const { app } = makeApp(backend);
+
+    const user1 = { role: "user" as const, content: "add 3 and 4" };
+    const round1 = await postJson(app, "/v1/chat/completions", {
+      messages: [user1],
+      tools: [ADD_TOOL],
+    });
+    const parked1 = await jsonOf<{
+      choices: Array<{ message: { tool_calls: Array<{ id: string }> } }>;
+    }>(round1);
+    const sessionId = round1.headers.get("X-Cursor-Session-Id");
+    const assistant1 = {
+      role: "assistant" as const,
+      content: null,
+      tool_calls: parked1.choices[0]!.message.tool_calls,
+    };
+    const toolMsg1 = {
+      role: "tool" as const,
+      tool_call_id: parked1.choices[0]!.message.tool_calls[0]!.id,
+      content: "7",
+    };
+
+    const resume1 = await postJson(app, "/v1/chat/completions", {
+      session_id: sessionId,
+      tools: [ADD_TOOL],
+      messages: [user1, assistant1, toolMsg1],
+    });
+    const done1 = await jsonOf<{
+      choices: Array<{ finish_reason: string; message: { content: string } }>;
+    }>(resume1);
+    expect(done1.choices[0]?.finish_reason).toBe("stop");
+    expect(done1.choices[0]?.message.content).toBe("sum=7");
+
+    const user2 = { role: "user" as const, content: "add 5 and 6" };
+    const round2 = await postJson(app, "/v1/chat/completions", {
+      session_id: sessionId,
+      tools: [ADD_TOOL],
+      messages: [user1, assistant1, toolMsg1, user2],
+    });
+    expect(round2.status).toBe(200);
+    const parked2 = await jsonOf<{
+      choices: Array<{
+        finish_reason: string;
+        message: { tool_calls: Array<{ id: string; function: { name: string; arguments: string } }> };
+      }>;
+    }>(round2);
+    expect(parked2.choices[0]?.finish_reason).toBe("tool_calls");
+    const callId2 = parked2.choices[0]!.message.tool_calls[0]!.id;
+    const assistant2 = {
+      role: "assistant" as const,
+      content: null,
+      tool_calls: parked2.choices[0]!.message.tool_calls,
+    };
+    const toolMsg2 = { role: "tool" as const, tool_call_id: callId2, content: "11" };
+
+    // Full history, including the stale round-1 tool message: this is what
+    // previously triggered "400 Unknown call_id: call_1".
+    const resume2 = await postJson(app, "/v1/chat/completions", {
+      session_id: sessionId,
+      tools: [ADD_TOOL],
+      messages: [user1, assistant1, toolMsg1, user2, assistant2, toolMsg2],
+    });
+    expect(resume2.status).toBe(200);
+    const done2 = await jsonOf<{
+      choices: Array<{ finish_reason: string; message: { content: string } }>;
+    }>(resume2);
+    expect(done2.choices[0]?.finish_reason).toBe("stop");
+    expect(done2.choices[0]?.message.content).toBe("sum2=11");
+  });
+
   it("returns 400 when a tool follow-up omits the session id", async () => {
     const { app } = makeApp(
       new FakeCursorBackend({
