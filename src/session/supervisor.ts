@@ -100,6 +100,23 @@ export function wrapCustomTools(
           };
           supervisor.parks.set(callId, parked);
           supervisor.onPark?.();
+          // Notify the listener right here, synchronously with park
+          // creation, instead of relying on the SDK's raw "tool_call"
+          // stream event to arrive at a predictable time relative to this
+          // execute() call -- it doesn't (see attachRun() below). This is
+          // also the only place with guaranteed-correct, guaranteed-
+          // complete data: the SDK invokes execute() with the real,
+          // already-resolved tool name and arguments.
+          if (supervisor.listener) {
+            Promise.resolve(
+              supervisor.listener({
+                type: "tool_call",
+                callId: parked.callId,
+                name: parked.name,
+                arguments: parked.arguments,
+              }),
+            ).catch(() => undefined);
+          }
         }),
     };
   }
@@ -111,31 +128,21 @@ function attachRun(supervisor: RunSupervisor, run: RunHandle): void {
   supervisor.streamDone = (async () => {
     if (!run.supports("stream")) return;
     for await (const event of run.stream()) {
-      let outEvent: StreamEvent | undefined = event;
-      if (event.type === "text") {
-        supervisor.outputText += event.text;
-      } else if (event.type === "tool_call") {
-        // Every MCP-routed call (i.e. every client-declared customTool call)
-        // reports name:"mcp" and a wire-level {providerIdentifier, toolName,
-        // args} envelope here -- not the resolved tool. wrapCustomTools()'s
-        // execute() callback is what the SDK actually invokes with the real,
-        // unwrapped name/arguments; that's already correctly recorded on the
-        // park. Never trust the raw event for either -- resolve through the
-        // park, and drop events with no matching park entirely (a built-in
-        // tool the agent used on its own, which the client never declared
-        // and has no way to resolve).
-        itemIdFor(supervisor, event.callId);
-        const park = supervisor.parks.get(event.callId);
-        outEvent = park
-          ? {
-              type: "tool_call",
-              callId: event.callId,
-              name: park.name,
-              arguments: park.arguments,
-            }
-          : undefined;
-      }
-      if (outEvent && supervisor.listener) await supervisor.listener(outEvent);
+      // tool_call SDK stream events are intentionally ignored here. Every
+      // MCP-routed call (i.e. every client-declared customTool call)
+      // reports name:"mcp" and a wire-level {providerIdentifier, toolName,
+      // args} envelope on this event, not the resolved tool -- and there's
+      // no reliable guarantee about when it arrives relative to
+      // wrapCustomTools()'s execute() call, which is what actually creates
+      // the park with the correct data and notifies the listener (see
+      // wrapCustomTools() above). Trusting this event for that notification
+      // caused tool_call SSE deltas to go missing entirely whenever the SDK
+      // emitted it before calling execute() -- the client would see the
+      // model announce a tool call in text, then nothing, with the turn
+      // still ending in finish_reason:"tool_calls".
+      if (event.type !== "text") continue;
+      supervisor.outputText += event.text;
+      if (supervisor.listener) await supervisor.listener(event);
     }
   })();
   supervisor.waitDone = run.wait().finally(() => {
@@ -304,9 +311,16 @@ export async function runSession(
         : undefined;
     const run = await record.agent.send(prompt, { customTools });
     supervisor.listener = options.onEvent;
-    attachRun(supervisor, run);
+    // Assign record.supervisor/activeRun *before* attachRun(): a
+    // customTools.execute() call can now fire the listener synchronously
+    // (see wrapCustomTools() above), and attachRun() can trigger that
+    // synchronously too (starting the run's stream can synchronously drive
+    // the underlying agent all the way through its first tool call). Any
+    // listener that reads record.supervisor (e.g. the Responses SSE
+    // handler's itemId lookup) needs it set before that can happen.
     record.supervisor = supervisor;
     record.activeRun = run;
+    attachRun(supervisor, run);
     const result = await collectTurn(record, options.onEvent, false);
     if (result.status === "requires_action") {
       record.mutex.release();

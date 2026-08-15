@@ -533,6 +533,56 @@ describe("OpenAI tool pass-through", () => {
     expect(argumentsJoined).not.toContain("toolName");
   });
 
+  it("streams the tool_calls delta even when the SDK never emits a tool_call stream event", async () => {
+    // Confirmed live against a running instance of this proxy: a real
+    // streaming tool-calling request's SSE never emits a tool_calls delta
+    // for a customTool call that parks -- the stream goes straight from
+    // text content chunks to finish_reason:"tool_calls" with nothing
+    // describing what to call. attachRun() used to depend on that event
+    // (gated on a matching park) to notify the listener at all, so when the
+    // event either arrived before the park existed or never arrived,
+    // client-visible notification silently vanished while the session
+    // still transitioned to requires_action -- permanently wedging it on a
+    // call the client was never told about. Listener notification must not
+    // depend on that event arriving at all; it happens directly from
+    // wrapCustomTools()'s execute() at park-creation time instead.
+    const backend = new FakeCursorBackend({
+      toolCall: {
+        name: "add",
+        arguments: { a: 5, b: 6 },
+        id: "call_test",
+        skipStreamEvent: true,
+      },
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      stream: true,
+      messages: [{ role: "user", content: "add 5 and 6" }],
+      tools: [ADD_TOOL],
+    });
+    expect(res.status).toBe(200);
+
+    const frames = (await res.text())
+      .split("\n\n")
+      .map((line) => line.replace(/^data: /, "").trim())
+      .filter((line) => line && line !== "[DONE]")
+      .map((line) => JSON.parse(line));
+
+    const names = frames
+      .map((frame) => frame.choices?.[0]?.delta?.tool_calls?.[0]?.function?.name)
+      .filter((name): name is string => Boolean(name));
+    expect(names).toEqual(["add"]);
+
+    const argumentsJoined = frames
+      .map((frame) => frame.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments)
+      .filter((chunk): chunk is string => typeof chunk === "string")
+      .join("");
+    expect(JSON.parse(argumentsJoined)).toEqual({ a: 5, b: 6 });
+
+    const finishReasons = frames.map((frame) => frame.choices?.[0]?.finish_reason);
+    expect(finishReasons).toContain("tool_calls");
+  });
+
   it("parks Responses as requires_action and completes on function_call_output", async () => {
     const backend = new FakeCursorBackend({
       toolCall: {

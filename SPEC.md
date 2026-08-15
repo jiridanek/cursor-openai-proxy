@@ -214,8 +214,8 @@ Non-stream **200** (parked tools): `finish_reason: "tool_calls"`, `message.tool_
 Stream: `text/event-stream`. Frames are `data: <json>\n\n` (no `event:` name), then `data: [DONE]\n\n`:
 
 1. role chunk: `delta: { role: "assistant" }`, `finish_reason: null`
-2. zero or more content chunks: `delta: { content }`
-3. if parked: `delta.tool_calls` (id/name then argument string deltas), then `finish_reason: "tool_calls"` — do **not** emit `finish_reason: "stop"`
+2. content chunks (`delta: { content }`) and, if parked, `delta.tool_calls` chunks (id/name then argument string deltas) — these are **not ordered relative to each other**: a tool call is announced the instant it's known (parked), independent of any concurrent text streaming, so a `tool_calls` chunk may arrive before, after, or interleaved with content chunks in the same turn
+3. if parked: `finish_reason: "tool_calls"` after the above — do **not** emit `finish_reason: "stop"`
 4. else: stop chunk: `delta: {}`, `finish_reason: "stop"`
 5. `[DONE]`
 

@@ -29,6 +29,16 @@ export type FakeToolCall = {
    * unwrapped arguments either way -- only the stream event is wrapped.
    */
   wireWrap?: boolean;
+  /**
+   * When set, no "tool_call" stream event is pushed at all before
+   * `tool.execute()` is called -- models the real SDK apparently never
+   * surfacing a client-visible stream event for a customTool call that
+   * parks (confirmed live: a real streaming request's SSE never emits a
+   * tool_calls delta, jumping straight from text to
+   * finish_reason:"tool_calls"). Proves listener notification doesn't
+   * depend on that event arriving at all.
+   */
+  skipStreamEvent?: boolean;
 };
 
 export type FakeOptions = {
@@ -204,25 +214,27 @@ class FakeRun implements RunHandle {
     if (toolCall && this.customTools) {
       const callId = toolCall.id ?? "call_test";
       const argsJson = JSON.stringify(toolCall.arguments);
-      this.#push(
-        toolCall.wireWrap
-          ? {
-              type: "tool_call",
-              callId,
-              name: "mcp",
-              arguments: JSON.stringify({
-                providerIdentifier: "custom-user-tools",
-                toolName: toolCall.name,
-                args: toolCall.arguments,
-              }),
-            }
-          : {
-              type: "tool_call",
-              callId,
-              name: toolCall.name,
-              arguments: argsJson,
-            },
-      );
+      if (!toolCall.skipStreamEvent) {
+        this.#push(
+          toolCall.wireWrap
+            ? {
+                type: "tool_call",
+                callId,
+                name: "mcp",
+                arguments: JSON.stringify({
+                  providerIdentifier: "custom-user-tools",
+                  toolName: toolCall.name,
+                  args: toolCall.arguments,
+                }),
+              }
+            : {
+                type: "tool_call",
+                callId,
+                name: toolCall.name,
+                arguments: argsJson,
+              },
+        );
+      }
       for (const extra of this.options.extraToolCalls ?? []) {
         void this.#dispatchExtra(extra);
       }
