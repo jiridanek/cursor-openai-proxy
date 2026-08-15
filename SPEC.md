@@ -167,6 +167,16 @@ Auth required. `Cursor.models.list()` flattened to OpenAI list format. Each cata
 
 Same flattening. Match on id or alias. Unknown → **404** `{ code: "model_not_found" }`.
 
+### `GET /v1/model/info`
+
+Auth required. Same catalog flattening as `/v1/models`, shaped like LiteLLM's proxy `/v1/model/info` for clients that expect that convention:
+
+```json
+{ "data": [{ "model_name": "auto", "litellm_params": { "model": "auto" }, "model_info": { "id": "auto", "db_model": false, "key": "auto", "litellm_provider": "cursor", "mode": "chat" } }] }
+```
+
+The Cursor SDK exposes no context-window, cost, or capability data per model, so `model_info` intentionally omits `max_tokens`/`max_input_tokens`/cost fields rather than fabricating them — only `id`/`db_model`/`key`/`litellm_provider`/`mode`, which LiteLLM's own schema treats as the guaranteed baseline.
+
 ### `POST /v1/embeddings`
 
 **501** Embeddings.

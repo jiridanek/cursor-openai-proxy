@@ -433,19 +433,60 @@ export type OpenAIModel = {
   owned_by: "cursor";
 };
 
-export function flattenCatalog(
+function dedupedCatalogIds(
   catalog: Array<{ id: string; aliases?: string[] }>,
-): { object: "list"; data: OpenAIModel[] } {
+): string[] {
   const seen = new Set<string>();
-  const data: OpenAIModel[] = [];
+  const ids: string[] = [];
   for (const model of catalog) {
     for (const id of [model.id, ...(model.aliases ?? [])]) {
       if (seen.has(id)) continue;
       seen.add(id);
-      data.push({ id, object: "model", created: 0, owned_by: "cursor" });
+      ids.push(id);
     }
   }
+  return ids;
+}
+
+export function flattenCatalog(
+  catalog: Array<{ id: string; aliases?: string[] }>,
+): { object: "list"; data: OpenAIModel[] } {
+  const data = dedupedCatalogIds(catalog).map((id) => ({
+    id,
+    object: "model" as const,
+    created: 0,
+    owned_by: "cursor" as const,
+  }));
   return { object: "list", data };
+}
+
+export type ModelInfoEntry = {
+  model_name: string;
+  litellm_params: { model: string };
+  model_info: {
+    id: string;
+    db_model: false;
+    key: string;
+    litellm_provider: "cursor";
+    mode: "chat";
+  };
+};
+
+export function flattenModelInfo(
+  catalog: Array<{ id: string; aliases?: string[] }>,
+): { data: ModelInfoEntry[] } {
+  const data = dedupedCatalogIds(catalog).map((id) => ({
+    model_name: id,
+    litellm_params: { model: id },
+    model_info: {
+      id,
+      db_model: false as const,
+      key: id,
+      litellm_provider: "cursor" as const,
+      mode: "chat" as const,
+    },
+  }));
+  return { data };
 }
 
 type ModelCatalogEntry = {

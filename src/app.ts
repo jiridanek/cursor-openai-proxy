@@ -22,6 +22,7 @@ import { newId, nowSeconds } from "./ids.ts";
 import {
   DEFAULT_MODEL,
   flattenCatalog,
+  flattenModelInfo,
   flattenResponsesInput,
   logIgnoredSampling,
   parseFunctionTools,
@@ -202,6 +203,11 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
       });
     }
     return c.json(listed);
+  });
+
+  app.get("/v1/model/info", async (c) => {
+    const catalog = await backend.listModels(c.get("cursorApiKey"));
+    return c.json(flattenModelInfo(catalog));
   });
 
   app.post("/v1/embeddings", () => {

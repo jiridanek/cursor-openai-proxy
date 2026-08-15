@@ -41,6 +41,44 @@ describe("GET /v1/models", () => {
   });
 });
 
+describe("GET /v1/model/info", () => {
+  it("lists catalog ids and aliases in LiteLLM shape", async () => {
+    const { app } = makeApp(new FakeCursorBackend());
+    const res = await app.request("/v1/model/info", { headers: authHeaders() });
+    expect(res.status).toBe(200);
+    const body = await jsonOf<{
+      data: Array<{
+        model_name: string;
+        litellm_params: { model: string };
+        model_info: {
+          id: string;
+          db_model: boolean;
+          litellm_provider: string;
+          mode: string;
+        };
+      }>;
+    }>(res);
+    expect(body.data.map((row) => row.model_name)).toEqual([
+      "composer-2.5",
+      "composer",
+      "auto",
+    ]);
+    for (const row of body.data) {
+      expect(row.litellm_params.model).toBe(row.model_name);
+      expect(row.model_info.id).toBe(row.model_name);
+      expect(row.model_info.db_model).toBe(false);
+      expect(row.model_info.litellm_provider).toBe("cursor");
+      expect(row.model_info.mode).toBe("chat");
+    }
+  });
+
+  it("requires auth", async () => {
+    const { app } = makeApp(new FakeCursorBackend());
+    const res = await app.request("/v1/model/info");
+    expect(res.status).toBe(401);
+  });
+});
+
 describe("unsupported routes", () => {
   it("returns 501 for embeddings", async () => {
     const { app } = makeApp();
