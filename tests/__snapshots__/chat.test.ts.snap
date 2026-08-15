@@ -1,0 +1,15 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`POST /v1/chat/completions > snapshots streaming SSE frames 1`] = `
+"data: {"id":"chatcmpl_ID","object":"chat.completion.chunk","created": 0,"model":"composer-2.5","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_ID","object":"chat.completion.chunk","created": 0,"model":"composer-2.5","choices":[{"index":0,"delta":{"content":"Hel"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_ID","object":"chat.completion.chunk","created": 0,"model":"composer-2.5","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_ID","object":"chat.completion.chunk","created": 0,"model":"composer-2.5","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
+
+"
+`;
