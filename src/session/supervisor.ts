@@ -225,6 +225,22 @@ async function collectTurn(
   supervisor.onPark = undefined;
   const outcome = await supervisor.waitDone;
   await supervisor.streamDone.catch(() => undefined);
+  if (supervisor.parks.size > 0) {
+    // The run reached a terminal outcome (finished/errored/cancelled by the
+    // SDK itself) while a customTools.execute() call was still parked
+    // awaiting resumeParked(). Unlike cancelRun(), which explicitly rejects
+    // every parked promise, this path used to just drop record.supervisor
+    // and leave those execute() promises unsettled forever -- a leaked
+    // promise, and whatever inside the SDK/tool machinery was awaiting it
+    // would hang indefinitely.
+    const abandoned = new Error(
+      "run finished while a tool call was still parked",
+    );
+    for (const park of supervisor.parks.values()) {
+      park.reject(abandoned);
+    }
+    supervisor.parks.clear();
+  }
   applyOutcome(record, outcome, supervisor.outputText);
   supervisor.listener = undefined;
   const stored = record.stored;

@@ -42,6 +42,15 @@ export type FakeOptions = {
    * turn later than the idle-park heuristic's window.
    */
   extraToolCalls?: Array<FakeToolCall & { delayMs: number }>;
+  /**
+   * When set alongside `toolCall`, the run reaches a terminal error outcome
+   * `errorAfterParkMs` after parking -- independent of whether `toolCall`
+   * has been resolved -- to simulate the underlying run failing out from
+   * under a still-parked tool call.
+   */
+  errorAfterParkMs?: number;
+  /** Observes whether a parked `toolCall.execute()` ultimately resolved or was rejected. */
+  onToolExecuteSettled?: (callId: string, outcome: "resolved" | "rejected") => void;
 };
 
 export class FakeCursorBackend implements CursorBackend {
@@ -196,6 +205,13 @@ class FakeRun implements RunHandle {
       for (const extra of this.options.extraToolCalls ?? []) {
         void this.#dispatchExtra(extra);
       }
+      if (this.options.errorAfterParkMs !== undefined) {
+        const delay = this.options.errorAfterParkMs;
+        void (async () => {
+          await new Promise<void>((resolve) => setTimeout(resolve, delay));
+          this.#finish({ status: "error", error: { message: "boom" } });
+        })();
+      }
       const tool = this.customTools[toolCall.name];
       let output = "";
       if (tool) {
@@ -205,7 +221,9 @@ class FakeRun implements RunHandle {
           });
           output =
             typeof result === "string" ? result : JSON.stringify(result ?? "");
+          this.options.onToolExecuteSettled?.(callId, "resolved");
         } catch {
+          this.options.onToolExecuteSettled?.(callId, "rejected");
           this.#finish({ status: "cancelled", result: "" });
           return;
         }

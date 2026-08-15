@@ -501,6 +501,32 @@ describe("OpenAI tool pass-through", () => {
     expect(callIds).toContain("call_late");
   });
 
+  it("rejects a parked tool call instead of leaking it when the run errors out from under it", async () => {
+    // collectTurn()'s terminal branch used to drop record.supervisor without
+    // touching any still-pending supervisor.parks entries, unlike
+    // cancelRun() which explicitly rejects them. A customTools.execute()
+    // promise still parked when the underlying run reaches a terminal
+    // outcome (here: an error unrelated to the tool call itself) would
+    // never settle -- a leaked promise.
+    const settled: Array<{ callId: string; outcome: string }> = [];
+    const backend = new FakeCursorBackend({
+      toolCall: { name: "add", arguments: { a: 1, b: 2 }, id: "call_leak" },
+      errorAfterParkMs: 5, // fires well before PARK_IDLE_MS (50ms)
+      onToolExecuteSettled: (callId, outcome) => settled.push({ callId, outcome }),
+    });
+    const { app } = makeApp(backend);
+
+    await postJson(app, "/v1/responses", {
+      input: "add",
+      tools: [ADD_TOOL],
+    });
+    // Let the rejection's microtask chain (park.reject -> the fake run's
+    // awaited tool.execute() -> its catch handler) flush.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(settled).toEqual([{ callId: "call_leak", outcome: "rejected" }]);
+  });
+
   it("returns 400 for an unknown tool call_id", async () => {
     const backend = new FakeCursorBackend({
       toolCall: { name: "add", arguments: { a: 1, b: 2 }, id: "call_test" },
