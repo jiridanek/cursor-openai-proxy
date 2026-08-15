@@ -7,10 +7,10 @@ import type {
 } from "../http/schemas.ts";
 import { newId, nowSeconds } from "../ids.ts";
 import {
-  effortParams,
   extractFunctionCallOutputs,
   flattenMessages,
   lastUserText,
+  modelParams,
   nextPrefixSessionId,
   prefixSessionId,
   sdkToolAllowlist,
@@ -48,17 +48,24 @@ async function createAgentRecord(opts: {
   stored: boolean;
   previousResponseId?: string | null;
   effort?: string;
+  fast?: string;
   passThroughTools?: boolean;
 }): Promise<SessionRecord> {
-  const catalog = opts.effort
-    ? await opts.backend.listModels(opts.apiKey)
-    : [];
+  // The catalog is always needed now, not just when `effort` is requested:
+  // some models (composer-2/2.5, grok-4.5/4.6) resolve an unset `fast` param
+  // to a value team admin policy blocks, so a safe default has to be applied
+  // whenever a model's catalog entry exposes `fast` at all -- see
+  // modelParams() / docs/dev/model-availability-map.md.
+  const catalog = await opts.backend.listModels(opts.apiKey);
   const agent = await opts.backend.createAgent({
     apiKey: opts.apiKey,
     model: opts.model,
     workspace: opts.config.workspace,
     mode: opts.config.agentMode,
-    params: effortParams(catalog, opts.model, opts.effort),
+    params: modelParams(catalog, opts.model, {
+      effort: opts.effort,
+      fast: opts.fast,
+    }),
     tools: sdkToolAllowlist(
       opts.config.agentMode,
       Boolean(opts.passThroughTools),
@@ -87,6 +94,7 @@ export async function createChatSession(opts: {
   model: string;
   id?: string;
   effort?: string;
+  fast?: string;
   passThroughTools?: boolean;
 }): Promise<SessionRecord> {
   const record = await createAgentRecord({
@@ -115,6 +123,7 @@ export async function resolveChatSession(opts: {
     opts.headers.cursorSessionId ??
     opts.headers.sessionId;
   const effort = opts.body.reasoning_effort;
+  const fast = opts.body.fast;
   const toolOutputs = toolOutputsFromMessages(opts.body.messages);
   const passThrough = Boolean(opts.tools && opts.tools.length > 0);
 
@@ -170,6 +179,7 @@ export async function resolveChatSession(opts: {
       apiKey: opts.apiKey,
       model: opts.model,
       effort,
+      fast,
       passThroughTools: passThrough,
     });
     return { record, prompt: flattenMessages(opts.body.messages) };
@@ -222,6 +232,7 @@ export async function resolveChatSession(opts: {
           id: opts.config.sessionMode === "sticky" ? lookupId : newId("sess_"),
           stored: true,
           effort,
+          fast,
           passThroughTools: passThrough,
         }),
     );
@@ -236,6 +247,7 @@ export async function resolveChatSession(opts: {
     apiKey: opts.apiKey,
     model: opts.model,
     effort,
+    fast,
     passThroughTools: passThrough,
   });
   return { record, prompt: flattenMessages(opts.body.messages) };
@@ -275,6 +287,7 @@ export async function resolveResponseSession(opts: {
   createdAt: number;
 }): Promise<ResolvedTurn> {
   const effort = opts.body.reasoning_effort ?? opts.body.reasoning?.effort;
+  const fast = opts.body.fast;
   const outputs = extractFunctionCallOutputs(opts.body.input);
   const passThrough = Boolean(opts.tools && opts.tools.length > 0);
 
@@ -349,6 +362,7 @@ export async function resolveResponseSession(opts: {
     stored: opts.store,
     previousResponseId: null,
     effort,
+    fast,
     passThroughTools: passThrough,
   });
   record.createdAt = opts.createdAt;

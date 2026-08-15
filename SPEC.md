@@ -134,6 +134,8 @@ Default `model` when omitted or blank: `auto`. Two distinct model-failure shapes
 
 `reasoning_effort` (chat) and `reasoning_effort` / `reasoning.effort` (responses) are mapped onto `model.params` **only** when `Cursor.models.list()` reports a parameter id `effort` or `reasoning_effort` that includes the requested value. Otherwise they are ignored. Applied at **agent create**, not on follow-up `send()`.
 
+`fast` (chat and responses, top-level string `"true"`/`"false"`) maps onto `model.params` the same way, but with a default: when a model's catalog entry exposes a `fast` parameter and the request didn't set `fast`, it's set to `"false"` rather than left unset. This exists because Cursor's backend resolves an unset `fast` param to `"true"` for some models (`composer-2`/`composer-2.5`/`grok-4.5`/`grok-4.6` at least), which team admin policy can block outright (`Model Blocked`) even though those same models' catalog `isDefault` variant advertises `fast: false` — see `docs/dev/model-availability-map.md`. The model catalog is now fetched on every agent creation (not only when `reasoning_effort` is set) so this default can be evaluated regardless of which params the request supplies.
+
 ### Tool pass-through
 
 OpenAI `type: "function"` tools are registered as `local.customTools` on `agent.send()`. When the model calls one, `execute()` **parks** (promise keyed by SDK `toolCallId` = OpenAI `call_id`). The HTTP turn ends with Chat `finish_reason: "tool_calls"` or Responses `status: "requires_action"`. The Cursor `Run` stays alive. The next client POST supplies the tool result and **resolves** the parked promise; it is **not** `agent.send()`.

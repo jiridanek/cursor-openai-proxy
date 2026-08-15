@@ -159,21 +159,51 @@ describe("POST /v1/chat/completions", () => {
     expect(backend.sends[1]?.prompt).toBe("again");
   });
 
-  it("does not fetch the model catalog unless reasoning_effort is set", async () => {
+  it("always fetches the model catalog, so the fast-param default can be evaluated regardless of reasoning_effort", async () => {
     const backend = new FakeCursorBackend();
     const { app } = makeApp(backend);
     await postJson(app, "/v1/chat/completions", {
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(backend.apiKeys).toHaveLength(1);
+    expect(backend.apiKeys).toHaveLength(2); // listModels + createAgent
 
     await postJson(app, "/v1/chat/completions", {
       reasoning_effort: "high",
       messages: [{ role: "user", content: "hi" }],
     });
-    expect(backend.apiKeys).toHaveLength(3);
+    expect(backend.apiKeys).toHaveLength(4);
     expect(backend.createOptions[1]?.params).toEqual([
       { id: "effort", value: "high" },
+    ]);
+  });
+
+  it("defaults fast to false for a model whose catalog exposes it, unless the client asks for fast=true", async () => {
+    const backend = new FakeCursorBackend();
+    backend.models = [
+      {
+        id: "composer-2",
+        parameters: [
+          { id: "fast", values: [{ value: "false" }, { value: "true" }] },
+        ],
+      },
+    ];
+    const { app } = makeApp(backend);
+
+    await postJson(app, "/v1/chat/completions", {
+      model: "composer-2",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(backend.createOptions[0]?.params).toEqual([
+      { id: "fast", value: "false" },
+    ]);
+
+    await postJson(app, "/v1/chat/completions", {
+      model: "composer-2",
+      fast: "true",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(backend.createOptions[1]?.params).toEqual([
+      { id: "fast", value: "true" },
     ]);
   });
 

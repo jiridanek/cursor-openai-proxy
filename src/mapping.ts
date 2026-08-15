@@ -448,23 +448,63 @@ export function flattenCatalog(
   return { object: "list", data };
 }
 
+type ModelCatalogEntry = {
+  id: string;
+  aliases?: string[];
+  parameters?: Array<{ id: string; values: Array<{ value: string }> }>;
+};
+
+function findCatalogParam(
+  catalog: ModelCatalogEntry[],
+  modelId: string,
+  paramIds: readonly string[],
+): { id: string; values: Array<{ value: string }> } | undefined {
+  const model = catalog.find(
+    (item) => item.id === modelId || item.aliases?.includes(modelId),
+  );
+  return model?.parameters?.find((item) => paramIds.includes(item.id));
+}
+
 export function effortParams(
-  catalog: Array<{
-    id: string;
-    aliases?: string[];
-    parameters?: Array<{ id: string; values: Array<{ value: string }> }>;
-  }>,
+  catalog: ModelCatalogEntry[],
   modelId: string,
   effort: string | undefined,
 ): Array<{ id: string; value: string }> | undefined {
   if (!effort) return undefined;
-  const model = catalog.find(
-    (item) => item.id === modelId || item.aliases?.includes(modelId),
-  );
-  const param = model?.parameters?.find(
-    (item) => item.id === "effort" || item.id === "reasoning_effort",
-  );
+  const param = findCatalogParam(catalog, modelId, ["effort", "reasoning_effort"]);
   if (!param) return undefined;
   if (!param.values.some((value) => value.value === effort)) return undefined;
   return [{ id: param.id, value: effort }];
+}
+
+// Cursor's backend resolves an unset `fast` param to `true` for at least
+// composer-2/composer-2.5/grok-4.5/grok-4.6 -- a value some team admin
+// policies block outright ("Model Blocked"), even though the catalog's own
+// `isDefault` variant for these models advertises `fast: false`. Default to
+// `false` ourselves whenever a model's catalog entry exposes `fast` and the
+// caller hasn't asked for a specific value, instead of inheriting whatever
+// Cursor's backend silently falls back to. See docs/dev/model-availability-map.md.
+export function fastParam(
+  catalog: ModelCatalogEntry[],
+  modelId: string,
+  fast: string | undefined,
+): { id: string; value: string } | undefined {
+  const param = findCatalogParam(catalog, modelId, ["fast"]);
+  if (!param) return undefined;
+  const value = fast ?? "false";
+  if (!param.values.some((v) => v.value === value)) return undefined;
+  return { id: "fast", value };
+}
+
+export function modelParams(
+  catalog: ModelCatalogEntry[],
+  modelId: string,
+  opts: { effort?: string; fast?: string },
+): Array<{ id: string; value: string }> | undefined {
+  const fast = fastParam(catalog, modelId, opts.fast);
+  const params = [
+    ...(effortParams(catalog, modelId, opts.effort) ?? []),
+    ...(fast ? [fast] : []),
+  ];
+  return params.length > 0 ? params : undefined;
 }
