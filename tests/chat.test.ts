@@ -57,6 +57,47 @@ describe("POST /v1/chat/completions", () => {
     ).toMatchSnapshot();
   });
 
+  it("omits usage from streaming chunks by default, but emits a final usage chunk when stream_options.include_usage is set", async () => {
+    const backend = new FakeCursorBackend({ reply: "Hello", deltas: ["Hel", "lo"] });
+    const { app } = makeApp(backend);
+
+    const withoutUsage = await postJson(app, "/v1/chat/completions", {
+      stream: true,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const framesWithoutUsage = (await withoutUsage.text())
+      .split("\n\n")
+      .map((line) => line.replace(/^data: /, "").trim())
+      .filter((line) => line && line !== "[DONE]")
+      .map((line) => JSON.parse(line));
+    expect(framesWithoutUsage.every((frame) => frame.usage === undefined)).toBe(true);
+
+    const withUsage = await postJson(app, "/v1/chat/completions", {
+      stream: true,
+      stream_options: { include_usage: true },
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const framesWithUsage = (await withUsage.text())
+      .split("\n\n")
+      .map((line) => line.replace(/^data: /, "").trim())
+      .filter((line) => line && line !== "[DONE]")
+      .map((line) => JSON.parse(line));
+
+    const last = framesWithUsage[framesWithUsage.length - 1];
+    expect(last.choices).toEqual([]);
+    expect(last.usage).toEqual({
+      prompt_tokens: 1,
+      completion_tokens: 1,
+      total_tokens: 2,
+    });
+    // the finish chunk (finish_reason: "stop") must still precede the usage
+    // chunk, matching OpenAI's own ordering
+    const finishIndex = framesWithUsage.findIndex(
+      (frame) => frame.choices?.[0]?.finish_reason === "stop",
+    );
+    expect(finishIndex).toBe(framesWithUsage.length - 2);
+  });
+
   it("sticky: second request with the same session id send()s only the new user text", async () => {
     const backend = new FakeCursorBackend();
     const { app } = makeApp(backend);

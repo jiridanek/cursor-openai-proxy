@@ -85,3 +85,21 @@ export function chatFinishChunk(
 export function chatStopChunk(id: string, created: number, model: string): ChatChunk {
   return chatFinishChunk(id, created, model, "stop");
 }
+
+export type ChatUsageChunk = {
+  id: string;
+  object: "chat.completion.chunk";
+  created: number;
+  model: string;
+  choices: [];
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+};
+
+export function chatUsageChunk(
+  id: string,
+  created: number,
+  model: string,
+  usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number },
+): ChatUsageChunk {
+  return { id, object: "chat.completion.chunk", created, model, choices: [], usage };
+}

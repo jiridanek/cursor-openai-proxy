@@ -21,6 +21,9 @@ export const ChatCompletionRequest = Schema.Struct({
   model: Schema.optional(Schema.String),
   messages: Schema.Array(ChatMessage),
   stream: Schema.optional(Schema.Boolean),
+  stream_options: Schema.optional(
+    Schema.Struct({ include_usage: Schema.optional(Schema.Boolean) }),
+  ),
   n: Schema.optional(Schema.Number),
   temperature: Schema.optional(Schema.Number),
   top_p: Schema.optional(Schema.Number),

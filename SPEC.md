@@ -176,6 +176,7 @@ Request (Effect Schema; extra fields ignored):
 | `messages` | yes | array of `{ role, content?, name?, tool_call_id?, tool_calls? }`; `role` may be `tool` |
 | `model` | no | default `auto` |
 | `stream` | no | SSE if true |
+| `stream_options.include_usage` | no | if true, emit a final usage-only chunk before `[DONE]` when streaming |
 | `n` | no | only `1` or omitted; else **400** |
 | `tools` | no | function tools; other types → **501**; empty `[]` = text-only |
 | `tool_choice` / `parallel_tool_calls` | no | ignored |
@@ -217,9 +218,10 @@ Stream: `text/event-stream`. Frames are `data: <json>\n\n` (no `event:` name), t
 2. content chunks (`delta: { content }`) and, if parked, `delta.tool_calls` chunks (id/name then argument string deltas) — these are **not ordered relative to each other**: a tool call is announced the instant it's known (parked), independent of any concurrent text streaming, so a `tool_calls` chunk may arrive before, after, or interleaved with content chunks in the same turn
 3. if parked: `finish_reason: "tool_calls"` after the above — do **not** emit `finish_reason: "stop"`
 4. else: stop chunk: `delta: {}`, `finish_reason: "stop"`
-5. `[DONE]`
+5. if `stream_options.include_usage` was true: one more chunk with `choices: []` and a populated `usage` (same values as the non-stream `usage` field) — sent after the finish chunk (step 3 or 4) regardless of `finish_reason`
+6. `[DONE]`
 
-If `wait()` returns `error`, skip the stop chunk and emit `data: { error: { message, type: "internal_error", code: "run_failed" } }` then `[DONE]`. Non-stream failed runs are **500** instead.
+If `wait()` returns `error`, skip the stop chunk and emit `data: { error: { message, type: "internal_error", code: "run_failed" } }` then `[DONE]` (no usage chunk in this case). Non-stream failed runs are **500** instead.
 
 Follow-up: last messages with `role: "tool"` + `tool_call_id` **resolve** the parked `execute()`; they are **not** `agent.send()`. Resolution relies **exclusively** on `tool_call_id` — no session id field (`session_id` / `cursor_session_id` / `X-Cursor-Session-Id` / `X-Session-Id`) is read for this at all, not even as a first-choice fast path: a present-but-wrong/irrelevant session id on the same request is ignored rather than hijacking or blocking the resume. The caller's own sessions are searched for one parked on the given `tool_call_id`; no live match (evicted session, restarted proxy, or the id never existed) → a fresh agent is created and the full history — including the tool call and its result — is replayed as its prompt, instead of erroring. A `tool_call_id` the matched session doesn't recognize → **400** `Unknown call_id`. A new user turn while parked → **409** `{ code: "requires_action" }`.
 

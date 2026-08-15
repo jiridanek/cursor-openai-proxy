@@ -6,6 +6,7 @@ import {
   chatFinishChunk,
   chatRoleChunk,
   chatToolCallChunk,
+  chatUsageChunk,
 } from "./codec/chatSse.ts";
 import {
   responseFunctionCallArgumentsDeltaEvent,
@@ -28,6 +29,7 @@ import {
   requireSingleChoice,
   toChatCompletion,
   toResponseObject,
+  toUsage,
   type FunctionToolDef,
 } from "./mapping.ts";
 import {
@@ -282,11 +284,18 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
           await writeDone(stream);
           return;
         }
+        const includeUsage = body.stream_options?.include_usage === true;
         if (result.status === "requires_action") {
           await writeJsonSse(
             stream,
             chatFinishChunk(completionId, created, model, "tool_calls"),
           );
+          if (includeUsage) {
+            await writeJsonSse(
+              stream,
+              chatUsageChunk(completionId, created, model, toUsage(record.usage)),
+            );
+          }
           await writeDone(stream);
           return;
         }
@@ -303,6 +312,12 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
           stream,
           chatFinishChunk(completionId, created, model, "stop"),
         );
+        if (includeUsage) {
+          await writeJsonSse(
+            stream,
+            chatUsageChunk(completionId, created, model, toUsage(record.usage)),
+          );
+        }
         await writeDone(stream);
       });
     }
