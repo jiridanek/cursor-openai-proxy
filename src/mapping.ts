@@ -196,10 +196,38 @@ export function flattenContent(
   return parts.join("");
 }
 
+function renderToolCall(call: unknown): string {
+  const rec = asRecord(call);
+  const fn = rec ? asRecord(rec.function) : undefined;
+  const name =
+    (fn && typeof fn.name === "string" && fn.name) ||
+    (rec && typeof rec.name === "string" && rec.name) ||
+    "unknown";
+  const args =
+    (fn && typeof fn.arguments === "string" && fn.arguments) ||
+    (rec && typeof rec.arguments === "string" && rec.arguments) ||
+    "{}";
+  return `${name}(${args})`;
+}
+
+function flattenMessageLine(message: ChatMessage): string {
+  if (message.role === "tool") {
+    const label = message.tool_call_id ? ` [${message.tool_call_id}]` : "";
+    return `tool${label}: ${flattenContent(message.content)}`;
+  }
+  const calls = message.tool_calls;
+  if (message.role === "assistant" && calls && calls.length > 0) {
+    const text = flattenContent(message.content);
+    const rendered = calls.map(renderToolCall).join(", ");
+    return text
+      ? `assistant: ${text}\nassistant: [called ${rendered}]`
+      : `assistant: [called ${rendered}]`;
+  }
+  return `${message.role}: ${flattenContent(message.content)}`;
+}
+
 export function flattenMessages(messages: readonly ChatMessage[]): string {
-  return messages
-    .map((message) => `${message.role}: ${flattenContent(message.content)}`)
-    .join("\n");
+  return messages.map(flattenMessageLine).join("\n");
 }
 
 export function lastUserText(messages: readonly ChatMessage[]): string {

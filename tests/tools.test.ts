@@ -285,6 +285,48 @@ describe("OpenAI tool pass-through", () => {
     expect(backend.creates).toBe(2); // a fresh agent for the new, unrelated turn
   });
 
+  it("replays tool calls and their results (not just blank lines) when starting a fresh agent from history", async () => {
+    // When resolveChatSession can't find a session for an explicit id (here:
+    // one that was simply never created), it already falls back today to
+    // starting a fresh agent and sending flattenMessages(messages) as the
+    // prompt. flattenMessages used to render an assistant message with
+    // tool_calls and content:null as just "assistant: " (empty -- content is
+    // null, and the tool_calls themselves were never rendered), and a
+    // role:"tool" message as "tool: <output>" with no indication of which
+    // call it answers. A model replaying that history has no idea what tool
+    // was called, with what arguments, or what the number in the tool
+    // message is answering.
+    const backend = new FakeCursorBackend({ reply: "ok" });
+    const { app } = makeApp(backend);
+
+    await postJson(app, "/v1/chat/completions", {
+      session_id: "sess_never_created",
+      tools: [ADD_TOOL],
+      messages: [
+        { role: "user", content: "add 3 and 4" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_ghost",
+              type: "function",
+              function: { name: "add", arguments: '{"a":3,"b":4}' },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_ghost", content: "7" },
+      ],
+    });
+
+    expect(backend.creates).toBe(1);
+    const prompt = backend.sends[0]?.prompt ?? "";
+    expect(prompt).toContain("add(");
+    expect(prompt).toContain('"a":3');
+    expect(prompt).toContain("call_ghost");
+    expect(prompt).toContain("7");
+  });
+
   it("returns 400 when a tool follow-up omits the session id", async () => {
     const { app } = makeApp(
       new FakeCursorBackend({

@@ -240,7 +240,12 @@ Resolve id in order: `cursor_session_id` → `session_id` → header `X-Cursor-S
 - After the run, alias the same agent under the hash of `messages + assistant reply`, so the next client request’s `messages[:-1]` matches.
 - Non-empty `tools` → **400** (tool loop needs sticky ids).
 
-Flattened new-agent prompt is lines of `"{role}: {content}"`.
+Flattened new-agent prompt is lines of `"{role}: {content}"`, except: an
+assistant message with `tool_calls` renders an extra
+`"assistant: [called {name}({arguments}), ...]"` line (in addition to its
+`content` line if non-empty), and a `role: "tool"` message renders as
+`"tool [{tool_call_id}]: {content}"` so a replayed tool exchange still shows
+which call was made and which result answers which call.
 
 ### `POST /v1/completions`
 
