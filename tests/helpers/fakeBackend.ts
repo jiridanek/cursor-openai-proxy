@@ -21,6 +21,14 @@ export type FakeToolCall = {
   arguments: Record<string, unknown>;
   id?: string;
   finalReply?: string | ((toolOutput: string) => string);
+  /**
+   * When set, the pushed tool_call stream event reports the real Cursor SDK
+   * wire shape for an MCP-routed customTool call: name:"mcp" and a
+   * {providerIdentifier, toolName, args} envelope, instead of the resolved
+   * name/arguments. `tool.execute()` is still invoked with the real,
+   * unwrapped arguments either way -- only the stream event is wrapped.
+   */
+  wireWrap?: boolean;
 };
 
 export type FakeOptions = {
@@ -196,12 +204,25 @@ class FakeRun implements RunHandle {
     if (toolCall && this.customTools) {
       const callId = toolCall.id ?? "call_test";
       const argsJson = JSON.stringify(toolCall.arguments);
-      this.#push({
-        type: "tool_call",
-        callId,
-        name: toolCall.name,
-        arguments: argsJson,
-      });
+      this.#push(
+        toolCall.wireWrap
+          ? {
+              type: "tool_call",
+              callId,
+              name: "mcp",
+              arguments: JSON.stringify({
+                providerIdentifier: "custom-user-tools",
+                toolName: toolCall.name,
+                args: toolCall.arguments,
+              }),
+            }
+          : {
+              type: "tool_call",
+              callId,
+              name: toolCall.name,
+              arguments: argsJson,
+            },
+      );
       for (const extra of this.options.extraToolCalls ?? []) {
         void this.#dispatchExtra(extra);
       }

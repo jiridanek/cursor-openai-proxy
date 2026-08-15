@@ -489,6 +489,50 @@ describe("OpenAI tool pass-through", () => {
     ).toMatchSnapshot();
   });
 
+  it("streams the resolved tool name/arguments, not the raw MCP wire event", async () => {
+    // Every MCP-routed customTool call reports name:"mcp" and a wire-level
+    // {providerIdentifier, toolName, args} envelope as its stream event --
+    // not the resolved tool. attachRun() used to forward that raw event
+    // straight to the SSE listener, so a streaming client would see a bogus
+    // function call named "mcp" instead of the tool it actually declared,
+    // with the wire envelope instead of real arguments.
+    const backend = new FakeCursorBackend({
+      toolCall: {
+        name: "add",
+        arguments: { a: 3, b: 4 },
+        id: "call_test",
+        wireWrap: true,
+      },
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      stream: true,
+      messages: [{ role: "user", content: "add 3 and 4" }],
+      tools: [ADD_TOOL],
+    });
+    expect(res.status).toBe(200);
+
+    const frames = (await res.text())
+      .split("\n\n")
+      .map((line) => line.replace(/^data: /, "").trim())
+      .filter((line) => line && line !== "[DONE]")
+      .map((line) => JSON.parse(line));
+
+    const names = frames
+      .map((frame) => frame.choices?.[0]?.delta?.tool_calls?.[0]?.function?.name)
+      .filter((name): name is string => Boolean(name));
+    expect(names).toEqual(["add"]);
+    expect(names).not.toContain("mcp");
+
+    const argumentsJoined = frames
+      .map((frame) => frame.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments)
+      .filter((chunk): chunk is string => typeof chunk === "string")
+      .join("");
+    expect(JSON.parse(argumentsJoined)).toEqual({ a: 3, b: 4 });
+    expect(argumentsJoined).not.toContain("providerIdentifier");
+    expect(argumentsJoined).not.toContain("toolName");
+  });
+
   it("parks Responses as requires_action and completes on function_call_output", async () => {
     const backend = new FakeCursorBackend({
       toolCall: {

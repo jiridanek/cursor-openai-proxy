@@ -111,14 +111,31 @@ function attachRun(supervisor: RunSupervisor, run: RunHandle): void {
   supervisor.streamDone = (async () => {
     if (!run.supports("stream")) return;
     for await (const event of run.stream()) {
+      let outEvent: StreamEvent | undefined = event;
       if (event.type === "text") {
         supervisor.outputText += event.text;
       } else if (event.type === "tool_call") {
+        // Every MCP-routed call (i.e. every client-declared customTool call)
+        // reports name:"mcp" and a wire-level {providerIdentifier, toolName,
+        // args} envelope here -- not the resolved tool. wrapCustomTools()'s
+        // execute() callback is what the SDK actually invokes with the real,
+        // unwrapped name/arguments; that's already correctly recorded on the
+        // park. Never trust the raw event for either -- resolve through the
+        // park, and drop events with no matching park entirely (a built-in
+        // tool the agent used on its own, which the client never declared
+        // and has no way to resolve).
         itemIdFor(supervisor, event.callId);
         const park = supervisor.parks.get(event.callId);
-        if (park && event.arguments) park.arguments = event.arguments;
+        outEvent = park
+          ? {
+              type: "tool_call",
+              callId: event.callId,
+              name: park.name,
+              arguments: park.arguments,
+            }
+          : undefined;
       }
-      if (supervisor.listener) await supervisor.listener(event);
+      if (outEvent && supervisor.listener) await supervisor.listener(outEvent);
     }
   })();
   supervisor.waitDone = run.wait().finally(() => {
