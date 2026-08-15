@@ -12,7 +12,9 @@
     "start:node": "node --experimental-strip-types src/index.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:e2e": "vitest run tests/e2e.test.ts",
+    "test:e2e:live": "LIVE_SMOKE=1 E2E_SPAWN=1 vitest run tests/e2e.test.ts"
   },
   "dependencies": {
     "@cursor/sdk": "^1.0.0",

@@ -1,57 +1,52 @@
 ---
 name: run-cursor-openai-proxy
-description: Build, launch, and drive tools/cursor-openai-proxy — an OpenAI-compatible Chat Completions + Responses HTTP proxy in front of the Cursor Agent SDK. Use when asked to run, start, smoke-test, or curl this proxy, verify a fix against a live instance, or check whether it's healthy.
+description: Build, launch, and drive tools/cursor-openai-proxy — an OpenAI-compatible Chat Completions + Responses HTTP proxy in front of the Cursor Agent SDK. Use when asked to run, start, smoke-test, or verify this proxy, or check whether it's healthy.
 ---
 
 Paths below are relative to `tools/cursor-openai-proxy/` (this skill's unit root), not to this skill directory.
 
-This is a stateless Node/Hono HTTP server, not a GUI — the driver is `curl`
-plus a spawn/wait wrapper (`smoke.sh`), not a browser or REPL. Two ways to
-run it, both already verified working in this container:
-
-1. **No Cursor credentials available** (the common case in a fresh
-   container): spawn a throwaway instance in `passthrough` auth mode and
-   run structural checks only — the server never needs a real Cursor
-   account to start or to correctly reject bad requests.
-2. **A real, already-running instance exists** (e.g. the one backing a
-   user's `goose`/IDE session, typically `http://127.0.0.1:11434` in
-   `hosted` mode): attach to it with real requests. This spends real Cursor
-   agent-run time/cost — only do this when the user has pointed you at a
-   specific running instance or explicitly authorized it.
+This is a stateless Node/Hono HTTP server, not a GUI. The driver
+(`smoke.sh`) is deliberately thin: it does not reimplement request/response
+checks — it delegates entirely to the project's own `tests/e2e.test.ts`,
+which already spawns the real CLI (`node_modules/tsx/dist/cli.mjs
+src/index.ts`), waits for its "listening on ..." line, and drives it over
+real HTTP.
 
 ## Run (agent path) — the driver
 
 ```bash
-# No credentials needed. Spawns its own instance on an ephemeral port,
-# checks health / auth / unsupported-endpoint / SDK-boundary error paths,
-# tears the instance down on exit.
+# No Cursor credentials needed. Spawns the real CLI on an ephemeral port
+# and checks /health -- this is all tests/e2e.test.ts's spawned-CLI test
+# does without CURSOR_API_KEY (its full live suite is skipped).
 .claude/skills/run-cursor-openai-proxy/smoke.sh
 ```
 
 ```bash
-# Attach to an already-running instance instead of spawning one. Sends two
-# real chat-completion requests (non-stream + streaming) through it.
-.claude/skills/run-cursor-openai-proxy/smoke.sh --live
-# or against a different address:
-BASE_URL=http://127.0.0.1:9000 .claude/skills/run-cursor-openai-proxy/smoke.sh --live
+# Full live suite: model listing, a real chat completion, Responses-API
+# chaining, and a full tool-call park/resume round trip -- against a
+# freshly spawned instance using a real Cursor account. Spends real
+# Cursor agent-run time/cost. Fails fast with a clear message if
+# CURSOR_API_KEY isn't set.
+CURSOR_API_KEY=<real-key> .claude/skills/run-cursor-openai-proxy/smoke.sh --live
 ```
 
-Both modes print `OK`/`FAIL` per check and a `N passed, M failed` summary,
-exiting non-zero on any failure.
+Both invocations are just `npm run test:e2e` / `npm run test:e2e:live`
+under the hood (see `package.json`) — `smoke.sh` only picks which one to
+run and checks `CURSOR_API_KEY` is present before the live path.
 
-**For comprehensive authenticated coverage** (model listing, Responses-API
-chaining, a full tool-call park/resume round trip) **don't reimplement it —
-use the project's own live e2e suite**, which spawns its own throwaway
-instance with a real key:
-
-```bash
-LIVE_SMOKE=1 E2E_SPAWN=1 CURSOR_API_KEY=<real-key> npm test -- tests/e2e.test.ts
-```
-
-`smoke.sh --live` is for a different, narrower purpose: a quick poke at a
-*specific instance that's already running* (not one the harness spawns
-itself) — e.g. confirming a fix landed after the user restarted their live
-process.
+**Verified this session:** the no-credentials path (`smoke.sh` with no
+args) ran successfully in this container, which has no `CURSOR_API_KEY`.
+The `--live` path's fail-fast guard (missing `CURSOR_API_KEY` aborts before
+touching the network) was verified; the successful end of that path
+(`CURSOR_API_KEY=<real> smoke.sh --live`) was **not** re-verified after this
+delegation refactor, since this environment holds no real Cursor
+credentials of its own. Earlier in this same working session, real chat
+completions (non-stream and streaming, including the
+`stream_options.include_usage` usage chunk) were confirmed working against
+a separately-running hosted-mode instance via plain `curl` — the proxy's
+live behavior is solid; only this exact npm-script wiring is unverified
+end-to-end. If you hold the key, run it yourself with `!
+CURSOR_API_KEY=... npm run test:e2e:live` to confirm.
 
 ## Prerequisites / Build
 
@@ -92,40 +87,39 @@ Blocks in the foreground; `Ctrl-C` to stop. `--help` lists all flags
 
 ## Gotchas
 
-- **Auth mode is inferred from `$CURSOR_API_KEY`, not a flag you set
-  explicitly for "passthrough":** omit `--cursor-api-key` and unset
-  `$CURSOR_API_KEY` to get `passthrough` mode, where the client's own
-  bearer token is forwarded to Cursor as-is. There's no explicit
-  `--auth-mode` flag.
+- **Auth mode is inferred from `$CURSOR_API_KEY`, not an explicit flag:**
+  omit `--cursor-api-key` and unset `$CURSOR_API_KEY` to get `passthrough`
+  mode, where the client's own bearer token is forwarded to Cursor as-is.
+  There's no `--auth-mode` flag.
 - **`passthrough` mode rejects certain "obviously fake" tokens outright**
   (`ollama`, `sk-dummy` — see `isDummyKey()` in `src/http/auth.ts`) with a
-  401 *before* ever reaching the SDK. Use a different placeholder (e.g.
-  `test-token-123`) if you want to see the request actually reach the
-  `@cursor/sdk` boundary and fail there instead (a clean `500 Invalid User
-  API Key`, not a proxy crash — this is expected without a real account and
-  is itself a useful smoke check).
-- **`describe.skipIf(!live)` in `tests/e2e.test.ts` still runs its
-  `mkdtempSync`/setup during Vitest's collection phase even when skipped** —
-  this is already handled (temp dirs are created in `beforeAll`, not the
-  `describe` body) but is a sharp edge if you add more tests to that file.
+  401 before ever reaching the SDK. Use a different placeholder (e.g.
+  `test-token-123`) to see a request actually reach the `@cursor/sdk`
+  boundary and fail there instead — a clean `500 Invalid User API Key`, not
+  a proxy crash, which is itself a useful manual check without real
+  credentials.
+- **`tests/e2e.test.ts`'s live suite needs both `CURSOR_API_KEY` *and*
+  `LIVE_SMOKE=1`** — `describe.skipIf(!live)` checks both. Setting only
+  `CURSOR_API_KEY` silently skips the whole suite; `npm run test:e2e:live`
+  already sets `LIVE_SMOKE=1` (and `E2E_SPAWN=1`) for you.
 - **The always-on "e2e spawned CLI" test at the bottom of `tests/e2e.test.ts`**
-  (no `LIVE_SMOKE`/`CURSOR_API_KEY` gate) already proves the exact
-  spawn-and-wait-for-listen-line pattern `smoke.sh` uses; that test and this
-  driver are deliberately the same shape.
+  (no env-var gate) is what makes `smoke.sh`'s no-credentials mode
+  meaningful at all — without it, running `tests/e2e.test.ts` with no
+  `CURSOR_API_KEY` would skip every test and prove nothing actually
+  spawned.
 - **Streaming `usage` is opt-in per OpenAI's own contract**: a plain
-  `stream: true` request never includes a `usage` field on any chunk: add
+  `stream: true` request never includes a `usage` field on any chunk; add
   `stream_options: {"include_usage": true}` to get a trailing
-  `{"choices": [], "usage": {...}}` chunk before `[DONE]`.
-- **`usage.total_tokens` is not `prompt_tokens + completion_tokens`** in the
-  live backend as of this writing — see
-  `docs/dev/usage-total-tokens-mismatch.md`. Don't be surprised if smoke
-  output shows this; it's a known, documented, not-yet-fixed discrepancy in
-  the underlying Cursor SDK's reported usage, not a smoke-script bug.
+  `{"choices": [], "usage": {...}}` chunk before `[DONE]`. Confirmed live
+  against a real hosted instance in this session.
+- **`usage.total_tokens` is not `prompt_tokens + completion_tokens`** in
+  the live backend as of this writing — see
+  `docs/dev/usage-total-tokens-mismatch.md`. Not a smoke-script bug.
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `smoke.sh` (no `--live`) hangs then prints "server never logged a listen address" | Check `$WORKDIR/server.log` (path printed on failure) for a stack trace — usually a missing `node_modules` (`npm install`) or a port already in use from a previous unclean run. |
-| `--live` mode's `/health` check fails | Nothing is listening at `$BASE_URL` (default `http://127.0.0.1:11434`). Start one first, or pass the right `BASE_URL`. |
-| `--live` mode's chat-completion check gets a non-200 with `"Invalid User API Key"` | The instance you pointed at isn't actually `hosted` with a valid Cursor account (check its `/health` response's `auth_mode`). Use the no-`--live` mode instead, which doesn't need real credentials. |
+| `smoke.sh` hangs or fails during collection | Check for a leftover process bound to a port from a previous unclean run, or run `npm install` if `node_modules` is missing/stale. |
+| `smoke.sh --live` exits immediately with `CURSOR_API_KEY: --live requires CURSOR_API_KEY...` | Expected — pass a real key: `CURSOR_API_KEY=<key> smoke.sh --live`. |
+| `test:e2e:live` reports `"Invalid User API Key"` | The key isn't a valid, active Cursor account key. Use the no-`--live` path instead, which needs no real credentials. |
