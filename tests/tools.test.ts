@@ -327,24 +327,51 @@ describe("OpenAI tool pass-through", () => {
     expect(prompt).toContain("7");
   });
 
-  it("returns 400 when a tool follow-up omits the session id", async () => {
-    const { app } = makeApp(
-      new FakeCursorBackend({
-        toolCall: { name: "add", arguments: { a: 1, b: 2 }, id: "call_test" },
-      }),
-    );
-    await postJson(app, "/v1/chat/completions", {
+  it("resumes a parked tool call via call_id alone when the session id is never sent", async () => {
+    // A standards-compliant OpenAI client only has to echo the
+    // tool_call_id back on its role:"tool" message -- that's core
+    // protocol, not this proxy's X-Cursor-Session-Id extension. A client
+    // that doesn't know about that extension (e.g. a generic
+    // OpenAI-compatible agent CLI) must still be able to complete a
+    // tool-calling round. This used to be a hard 400
+    // ("Tool follow-ups require X-Cursor-Session-Id or session_id").
+    const backend = new FakeCursorBackend({
+      toolCall: {
+        name: "add",
+        arguments: { a: 1, b: 2 },
+        id: "call_test",
+        finalReply: (output) => `sum=${output}`,
+      },
+    });
+    const { app } = makeApp(backend);
+    const first = await postJson(app, "/v1/chat/completions", {
       messages: [{ role: "user", content: "add" }],
       tools: [ADD_TOOL],
     });
+    const parked = await jsonOf<{
+      choices: Array<{ message: { tool_calls: Array<{ id: string }> } }>;
+    }>(first);
+
     const res = await postJson(app, "/v1/chat/completions", {
+      // deliberately no session_id / X-Cursor-Session-Id anywhere
       tools: [ADD_TOOL],
       messages: [
         { role: "user", content: "add" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: parked.choices[0]!.message.tool_calls,
+        },
         { role: "tool", tool_call_id: "call_test", content: "3" },
       ],
     });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    const done = await jsonOf<{
+      choices: Array<{ finish_reason: string; message: { content: string } }>;
+    }>(res);
+    expect(done.choices[0]?.finish_reason).toBe("stop");
+    expect(done.choices[0]?.message.content).toBe("sum=3");
+    expect(backend.creates).toBe(1); // true resume, not a new agent
   });
 
   it("returns 400 for prefix mode plus tools", async () => {

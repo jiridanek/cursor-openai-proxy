@@ -136,37 +136,43 @@ export async function resolveChatSession(opts: {
         : undefined
       : stickyId;
 
-  if (toolOutputs.length > 0 && !lookupId) {
-    throw new HttpError(
-      400,
-      "Tool follow-ups require X-Cursor-Session-Id or session_id",
-    );
+  let existing = lookupId
+    ? opts.registry.get(opts.callerKeyHash, lookupId)
+    : undefined;
+
+  if (!existing && toolOutputs.length > 0) {
+    // The client didn't supply (or its id didn't match) an explicit session
+    // id, but every OpenAI-compliant client is already required by the base
+    // tool-calling protocol to echo the exact tool_call_id back on its
+    // result -- use that to find the live parked Run without needing any
+    // proxy-specific header.
+    const outputIds = new Set(toolOutputs.map((output) => output.callId));
+    existing = opts.registry.findByPendingCall(opts.callerKeyHash, outputIds);
+  }
+
+  if (existing) {
+    if (existing.status === "requires_action") {
+      const pendingIds = new Set(
+        (existing.pendingToolCalls ?? []).map((call) => call.callId),
+      );
+      const relevantOutputs = toolOutputs.filter((output) =>
+        pendingIds.has(output.callId),
+      );
+      if (relevantOutputs.length === 0) {
+        throw new HttpError(409, "Session is waiting for tool outputs", {
+          code: "requires_action",
+        });
+      }
+      return {
+        record: existing,
+        prompt: "",
+        resume: { outputs: relevantOutputs },
+      };
+    }
+    return { record: existing, prompt: lastUserText(opts.body.messages) };
   }
 
   if (lookupId) {
-    const existing = opts.registry.get(opts.callerKeyHash, lookupId);
-    if (existing) {
-      if (existing.status === "requires_action") {
-        const pendingIds = new Set(
-          (existing.pendingToolCalls ?? []).map((call) => call.callId),
-        );
-        const relevantOutputs = toolOutputs.filter((output) =>
-          pendingIds.has(output.callId),
-        );
-        if (relevantOutputs.length === 0) {
-          throw new HttpError(409, "Session is waiting for tool outputs", {
-            code: "requires_action",
-          });
-        }
-        return {
-          record: existing,
-          prompt: "",
-          resume: { outputs: relevantOutputs },
-        };
-      }
-      return { record: existing, prompt: lastUserText(opts.body.messages) };
-    }
-
     // No session exists yet under this id. getOrCreate() dedupes concurrent
     // requests racing to create it: only the first caller's factory actually
     // runs; later callers (in flight before it resolves) share its result

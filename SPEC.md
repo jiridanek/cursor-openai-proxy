@@ -186,7 +186,7 @@ Request (Effect Schema; extra fields ignored):
 
 `content` may be a string, `null`, or an array of parts. Parts with `image_url` or `type` `image_url` / `input_image` → **501**. Text parts are concatenated.
 
-The tool loop **requires sticky sessions**. `--session-mode prefix` plus a non-empty `tools` array → **400**. Return `X-Cursor-Session-Id`. A follow-up that submits `role: "tool"` messages without that id → **400**.
+The tool loop **requires sticky sessions** to *create* a new tool-using conversation: `--session-mode prefix` plus a non-empty `tools` array → **400** (an agent's tool permissions are fixed at creation time, so a content-hashed session can't be safely upgraded to support tools later). Return `X-Cursor-Session-Id` as a convenience. Resuming an already-parked tool call does **not** require that id, though: if the follow-up's session id is absent or unknown, the caller's own sessions are searched for one whose parked call matches the `tool_call_id` being resolved (see "Follow-up" below); only if that also misses does resolution fall back to starting a fresh agent with the full history replayed.
 
 Response header: `X-Cursor-Session-Id` = the resolved session id.
 
@@ -221,7 +221,7 @@ Stream: `text/event-stream`. Frames are `data: <json>\n\n` (no `event:` name), t
 
 If `wait()` returns `error`, skip the stop chunk and emit `data: { error: { message, type: "internal_error", code: "run_failed" } }` then `[DONE]`. Non-stream failed runs are **500** instead.
 
-Follow-up: last messages with `role: "tool"` + `tool_call_id` **resolve** the parked `execute()`; they are **not** `agent.send()`. Unknown `tool_call_id` → **400**. A new user turn while parked → **409** `{ code: "requires_action" }`.
+Follow-up: last messages with `role: "tool"` + `tool_call_id` **resolve** the parked `execute()`; they are **not** `agent.send()`. Resolution order: (1) an explicit `session_id`/`cursor_session_id`/header, if it names a session waiting on this call; (2) otherwise, the caller's own sessions are searched for one parked on the given `tool_call_id`; (3) otherwise, a fresh agent is created and the full history (including the tool call and its result) is replayed as its prompt, instead of erroring. A `tool_call_id` the session found in (1)/(2) doesn't recognize → **400** `Unknown call_id`. A new user turn while parked → **409** `{ code: "requires_action" }`.
 
 #### Chat session modes
 
@@ -230,8 +230,8 @@ Follow-up: last messages with `role: "tool"` + `tool_call_id` **resolve** the pa
 Resolve id in order: `cursor_session_id` → `session_id` → header `X-Cursor-Session-Id` → `X-Session-Id`.
 
 - Id present and known for this caller → reuse agent; `send()` **only the last user message text** (unless the follow-up is a parked-tool resume).
-- Id present but unknown → create agent with that id; `send()` flattened full `messages`.
-- Id absent → create agent (`sess_` + random); return that id in the header; `send()` flattened full `messages`.
+- Id present but unknown, or absent, and the follow-up is a tool-call resume (trailing `role: "tool"` message(s)) → look up the caller's own sessions by `tool_call_id` instead; a match resumes that live agent's parked `execute()`, no session id required.
+- No id, no id match, and no call_id match → create agent (given id if one was supplied, else `sess_` + random); return that id in the header; `send()` flattened full `messages`.
 
 **`prefix`**
 

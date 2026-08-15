@@ -99,6 +99,28 @@ export class SessionRegistry {
     return promise;
   }
 
+  /**
+   * Find a caller's own session that's currently parked waiting on one of
+   * `callIds`. Lets a tool-call follow-up be resumed by the `tool_call_id`
+   * alone -- something every OpenAI-compliant client already echoes back as
+   * part of the base protocol -- with no proxy-specific session id needed.
+   * A linear scan: callers have few concurrent open sessions in practice, so
+   * no dedicated reverse index (with its own cleanup burden) is warranted.
+   */
+  findByPendingCall(
+    callerKeyHash: string,
+    callIds: ReadonlySet<string>,
+  ): SessionRecord | undefined {
+    for (const record of this.all()) {
+      if (record.callerKeyHash !== callerKeyHash) continue;
+      if (record.status !== "requires_action") continue;
+      if ((record.pendingToolCalls ?? []).some((call) => callIds.has(call.callId))) {
+        return record;
+      }
+    }
+    return undefined;
+  }
+
   existsUnderAnyCaller(id: string): boolean {
     const hashes = this.#ids.get(id);
     return Boolean(hashes && hashes.size > 0);
