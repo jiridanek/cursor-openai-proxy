@@ -108,6 +108,10 @@ function wrapAgent(agent: SdkAgent): AgentHandle {
 }
 
 const CATALOG_TTL_MS = 60_000;
+// Passthrough auth mode keys the cache on the caller-supplied bearer token,
+// so without a cap a long-running proxy serving many distinct keys would
+// grow #catalog forever. This bounds worst-case memory use.
+const MAX_CATALOG_ENTRIES = 1_000;
 
 export class SdkCursorBackend implements CursorBackend {
   #catalog = new Map<string, { expires: number; models: ModelListItem[] }>();
@@ -129,6 +133,7 @@ export class SdkCursorBackend implements CursorBackend {
             values: parameter.values.map((value) => ({ value: value.value })),
           })),
         }));
+        this.#pruneCatalog();
         this.#catalog.set(apiKey, {
           expires: Date.now() + CATALOG_TTL_MS,
           models: mapped,
@@ -140,6 +145,23 @@ export class SdkCursorBackend implements CursorBackend {
       });
     this.#inflight.set(apiKey, load);
     return load;
+  }
+
+  /** Exposed for tests only; not part of the CursorBackend contract. */
+  get catalogSize(): number {
+    return this.#catalog.size;
+  }
+
+  #pruneCatalog(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.#catalog) {
+      if (entry.expires <= now) this.#catalog.delete(key);
+    }
+    while (this.#catalog.size >= MAX_CATALOG_ENTRIES) {
+      const oldest = this.#catalog.keys().next().value;
+      if (oldest === undefined) break;
+      this.#catalog.delete(oldest);
+    }
   }
 
   async createAgent(options: CreateAgentOptions): Promise<AgentHandle> {
