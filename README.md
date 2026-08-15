@@ -82,7 +82,7 @@ Chat tool loops need **sticky** sessions (`X-Cursor-Session-Id`) because the sam
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--port` | `11434` | Listen port |
+| `--port` | `11434` | Listen port (`0` = OS-assigned) |
 | `--host` | `127.0.0.1` | Bind address |
 | `--workspace` | cwd | Local agent `cwd` |
 | `--cursor-api-key` | `$CURSOR_API_KEY` | Hosted Cursor key; omit for passthrough |
@@ -119,8 +119,14 @@ Not implemented (501): embeddings, vision, `/v1/completions`, non-function tool 
 npm test
 ```
 
-Default tests mock the SDK (no live key). Optional live smoke:
+Default tests mock the SDK (no live key). Optional live HTTP e2e (starts the proxy on an ephemeral port in-process):
 
 ```bash
-LIVE_SMOKE=1 CURSOR_API_KEY=crsr_... npm test -- tests/live.smoke.test.ts
+LIVE_SMOKE=1 CURSOR_API_KEY=crsr_... npm test -- tests/e2e.test.ts
+```
+
+`E2E_SPAWN=1` starts the real CLI (`tsx src/index.ts --port 0`) as a subprocess instead:
+
+```bash
+LIVE_SMOKE=1 E2E_SPAWN=1 CURSOR_API_KEY=crsr_... npm test -- tests/e2e.test.ts
 ```

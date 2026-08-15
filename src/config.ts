@@ -55,7 +55,7 @@ export function parseArgs(
     switch (arg) {
       case "--port":
         opts.port = Number(next());
-        if (!Number.isInteger(opts.port) || opts.port <= 0) {
+        if (!Number.isInteger(opts.port) || opts.port < 0) {
           throw new Error(`Invalid --port: ${opts.port}`);
         }
         break;
@@ -112,7 +112,7 @@ export function toProxyConfig(opts: CliOptions): ProxyConfig {
 
 export const USAGE = `Usage: cursor-openai-proxy [options]
 
-  --port <n>              Listen port (default 11434)
+  --port <n>              Listen port (default 11434; 0 = ephemeral)
   --host <addr>           Bind address (default 127.0.0.1)
   --workspace <path>      Local agent cwd (default process cwd)
   --cursor-api-key <key>  Hosted Cursor API key (else $CURSOR_API_KEY, else passthrough)

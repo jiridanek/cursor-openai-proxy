@@ -41,7 +41,7 @@ CLI:
 
 | Flag | Default | Meaning |
 |---|---|---|
-| `--port` | `11434` | Listen port (positive integer) |
+| `--port` | `11434` | Listen port (`0` = OS-assigned) |
 | `--host` | `127.0.0.1` | Bind address |
 | `--workspace` | process cwd | Local agent working directory |
 | `--cursor-api-key` | `$CURSOR_API_KEY` | Hosted Cursor key; omit (and unset env) for passthrough |
