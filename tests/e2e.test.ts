@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,12 +38,18 @@ describe.skipIf(!live)(
   `e2e HTTP proxy (${spawnCli ? "spawned" : "in-process"})`,
   { timeout: 120_000 },
   () => {
-  const workspace = mkdtempSync(join(tmpdir(), "cursor-proxy-e2e-"));
+  let workspace: string;
   let base = "";
   let server: ServerType | undefined;
   let child: ChildProcess | undefined;
 
   beforeAll(async () => {
+    // Created here, not at describe-body scope: `describe.skipIf` still
+    // runs this callback body during Vitest's collection phase even when
+    // the suite ends up skipped, so a call here would leak a tmp dir on
+    // every `npm test` run regardless of LIVE_SMOKE. beforeAll only runs
+    // when the suite's tests actually execute.
+    workspace = mkdtempSync(join(tmpdir(), "cursor-proxy-e2e-"));
     if (spawnCli) {
       const started = await startSpawnedProxy(workspace);
       child = started.child;
@@ -75,15 +81,16 @@ describe.skipIf(!live)(
   afterAll(async () => {
     if (child) {
       await stopChild(child);
-      return;
+    } else {
+      await new Promise<void>((resolve, reject) => {
+        if (!server) {
+          resolve();
+          return;
+        }
+        server.close((err) => (err ? reject(err) : resolve()));
+      });
     }
-    await new Promise<void>((resolve, reject) => {
-      if (!server) {
-        resolve();
-        return;
-      }
-      server.close((err) => (err ? reject(err) : resolve()));
-    });
+    rmSync(workspace, { recursive: true, force: true });
   });
 
   async function get(path: string, auth = true): Promise<Response> {
@@ -239,6 +246,7 @@ describe("e2e spawned CLI", { timeout: 20_000 }, () => {
       expect(await res.json()).toMatchObject({ status: "ok" });
     } finally {
       await stopChild(started.child);
+      rmSync(workspace, { recursive: true, force: true });
     }
   });
 });
