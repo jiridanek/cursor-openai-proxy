@@ -2,7 +2,9 @@
 
 This document is the behavioral contract for `tools/cursor-openai-proxy`. It describes what clients can rely on. Implementation lives next to this file; [README.md](README.md) covers how to run it.
 
-The proxy is an **Ollama-style OpenAI `/v1` server** plus **stateful Responses**. It is **not** a raw completions model. Every generation request becomes one Cursor **local agent run**. Inference still uses Cursor-hosted models; “local” means the agent loop and workspace files stay on this machine.
+**Overarching goal: minimize the agent.** Cursor-hosted IDE models are only reachable through a local agent run; that agent must remain in the loop for ToS. This proxy exists to put those models on an OpenAI-shaped HTTP endpoint while giving the agent as little work as possible: OpenAI JSON transport, client-owned tools, no ambient MCP, no autoReview, ignore sampling rather than pretending to be a completions API.
+
+OpenAI JSON is the **transport**. The agent loop is the **ToS-required runtime**, not the product. Every generation request still becomes one Cursor **local agent run**. Inference uses Cursor-hosted models; “local” means the agent loop and workspace files stay on this machine.
 
 Default model id: `auto`. Default bind: `127.0.0.1:11434`.
 
@@ -12,13 +14,16 @@ Default model id: `auto`. Default bind: `127.0.0.1:11434`.
 
 This version does **not**:
 
+- Present as an autonomous workspace agent (Open-Interpreter / Aider style). The agent is a ToS constraint to shrink, not a product to grow.
+- Honor LiteLLM-style sampling (`temperature`, `top_p`, `seed`, `max_tokens`, `max_completion_tokens`) — they are accepted and ignored (logged when `DEBUG` is set)
+- Emulate `response_format` / JSON mode
+- Combine Cursor built-ins (`read`, `grep`, `shell`, …) with client function tools on the same agent. Client `tools` replace built-ins so Cursor is not the tool runner.
 - Run cloud agents (`bc-` ids)
 - Expose Cursor as a public multi-tenant completions product
 - Implement OpenAI embeddings, vision, Assistants, Realtime, the Conversations resource, or `/v1/completions`
 - Use Cursor hooks as the tool bridge (hooks cannot emit a Responses `function_call`; deny is not a tool result)
 - Use `local.autoReview` or sandbox as the way to strip `shell` / `edit` (the SDK **allowlist** does that)
 - Load the operator’s Cursor-app MCP config (`~/.cursor/mcp.json`, project `.cursor/mcp.json`, plugins, dashboard)
-- Honor sampling knobs (`temperature`, `top_p`, `seed`, `max_tokens`, `max_completion_tokens`) — they are accepted and ignored (logged when `DEBUG` is set)
 - Persist sessions across process restarts (in-memory only)
 
 OpenAI **function tools** are in scope (Chat Completions and Responses). See §5.
@@ -53,13 +58,13 @@ Always `local: { cwd: --workspace, settingSources: [] }`. Never pass `mcpServers
 
 | Situation | SDK `mode` | `tools` on create |
 |---|---|---|
-| `--agent-mode ask`, no OpenAI `tools` | omitted | `["read", "grep", "glob", "ls"]` (read-only built-ins; no shell/edit) |
-| Client sent a non-empty OpenAI `tools` array | as below | `["mcp"]` only (Cursor built-ins gone; only `local.customTools`) |
-| `--agent-mode plan` / `agent`, no OpenAI `tools` | `"plan"` / `"agent"` | omit (SDK default set, including shell) |
+| `--agent-mode ask`, no OpenAI `tools` | omitted | `["read", "grep", "glob", "ls"]` (narrow read-only set; some toolset must exist) |
+| Client sent a non-empty OpenAI `tools` array | as below | `["mcp"]` only — exclusive so Cursor is not the tool runner; only `local.customTools` |
+| `--agent-mode plan` / `agent`, no OpenAI `tools` | `"plan"` / `"agent"` | omit (SDK default set, including shell); opt-in, widens the agent |
 
 `--agent-mode` still applies when OpenAI `tools` are present (`ask` omits SDK `mode`; `plan` / `agent` set it). Do **not** use `tools: []` for the client-tool bridge (that disables custom tools too). Do **not** `disallowedTools: ["mcp"]`. Empty OpenAI `tools: []` is text-only for that request (no customTools, no park); keep the ask/plan/agent mapping above.
 
-`tools: ["mcp"]` grants the MCP **capability** needed for `custom-user-tools`. Combined with `settingSources: []` and no `mcpServers`, the only MCP tools the model can see are `local.customTools` built from **this HTTP request’s** OpenAI `tools` array.
+`tools: ["mcp"]` grants the MCP **capability** needed for `custom-user-tools` and **drops Cursor built-ins** (`read` / `grep` / `shell`). That exclusivity is the minimize-agent goal, not a gap: the client owns execution. Combined with `settingSources: []` and no `mcpServers`, the only MCP tools the model can see are `local.customTools` built from **this HTTP request’s** OpenAI `tools` array.
 
 ---
 
@@ -321,7 +326,9 @@ SDK `toolCallId` is reused as OpenAI `call_id` / Chat `tool_calls[].id`.
 
 ---
 
-## 7. Client mapping (Ollama drop-in)
+## 7. Client mapping (wire-compatible)
+
+The OpenAI client is wire-compatible (`base_url`). Each turn is still a **minimized agent** run, not a token-for-token completion.
 
 ```python
 from openai import OpenAI
@@ -329,7 +336,7 @@ client = OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="ollama")  # hoste
 # client = OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="crsr_...")  # passthrough
 ```
 
-- Chat Completions: set `extra_body={"session_id": …}` or read `X-Cursor-Session-Id` from the first response to continue a sticky session. Tool follow-ups **must** send that id.
+- Chat Completions: compatibility layer. Set `extra_body={"session_id": …}` or read `X-Cursor-Session-Id` from the first response to continue a sticky session. Tool follow-ups **must** send that id (same live `Run`).
 - Responses: pass `previous_response_id` from the prior `id`. That is the native session handle. Submit tool results as `function_call_output` items on the next create.
 
-Each turn is an agent run against `--workspace`. It can read the tree (and, unless `ask` or a client-tools allowlist of `["mcp"]`, edit it). It is not a token-for-token chat model.
+Default `ask` can read `--workspace` with the narrow allowlist. Client `tools` replace those built-ins. `plan` / `agent` can edit the tree; that widens the agent and is opt-in.
