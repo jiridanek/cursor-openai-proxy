@@ -45,7 +45,7 @@ export type FakeOptions = {
   reply?: string | ((prompt: string) => string);
   deltas?: string[];
   hangUntilCancel?: boolean;
-  runError?: { message: string };
+  runError?: { message: string; code?: string };
   toolCall?: FakeToolCall;
   /**
    * When set, each successive `send()` on the fake agent pops the next entry

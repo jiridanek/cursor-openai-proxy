@@ -104,6 +104,26 @@ describe("POST /v1/responses", () => {
     });
   });
 
+  it("forwards the SDK's own error code on a failed Response", async () => {
+    const backend = new FakeCursorBackend({
+      runError: { message: "Model Blocked", code: "model_blocked" },
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/responses", {
+      input: "What is 3+4?",
+    });
+    expect(res.status).toBe(200);
+    const body = await jsonOf<{
+      status: string;
+      error: { message: string; code?: string };
+    }>(res);
+    expect(body.status).toBe("failed");
+    expect(body.error).toMatchObject({
+      message: "Model Blocked",
+      code: "model_blocked",
+    });
+  });
+
   it("GET /v1/responses/{id} returns stored output", async () => {
     const { app } = makeApp(new FakeCursorBackend({ reply: "stored" }));
     const createdRes = await postJson(app, "/v1/responses", {

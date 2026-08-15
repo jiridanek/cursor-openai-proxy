@@ -90,7 +90,7 @@ function chatRunError(record: SessionRecord): HttpError | undefined {
   if (record.status !== "failed") return undefined;
   return new HttpError(500, record.error?.message ?? "Agent run failed", {
     type: "internal_error",
-    code: "run_failed",
+    code: record.error?.code ?? "run_failed",
   });
 }
 

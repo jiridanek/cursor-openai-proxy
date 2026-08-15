@@ -128,7 +128,9 @@ Unhandled exceptions → **500** `{ type: "internal_error", code: "internal" }`.
 
 Unimplemented features use **501** `{ code: "unsupported" }` unless noted.
 
-Default `model` when omitted or blank: `auto`. A model id that appears in `GET /v1/models` can still fail at run time (for example team admin blocks). Chat Completions then return **500** `{ error: { type: "internal_error", code: "run_failed", message } }` with the Cursor `wait()` error. Responses stay **200** with `status: "failed"` and `error: { message }`.
+Default `model` when omitted or blank: `auto`. Two distinct model-failure shapes:
+- **Rejected before any run starts** (e.g. an unknown model id) — the Cursor SDK throws a typed error out of agent creation. The proxy maps it by SDK error class to the matching HTTP status (`ConfigurationError` → 400, `AuthenticationError` → 401, `RateLimitError` → 429, `AgentBusyError` → 409, `NetworkError` → 503, any other `CursorSdkError` → 500), `type: "invalid_request_error"` for the 4xx classes / `"internal_error"` for 5xx, and `code` set to the SDK's own `err.code` when present, else `null`.
+- **Fails at run time** despite a model id that appears in `GET /v1/models` (for example team admin blocks) — discovered only via `wait()`. Chat Completions return **500** `{ error: { type: "internal_error", code, message } }` where `code` is the Cursor `wait()` error's own `code` when the SDK supplied one, else `"run_failed"`. Responses stay **200** with `status: "failed"` and `error: { message, code? }`.
 
 `reasoning_effort` (chat) and `reasoning_effort` / `reasoning.effort` (responses) are mapped onto `model.params` **only** when `Cursor.models.list()` reports a parameter id `effort` or `reasoning_effort` that includes the requested value. Otherwise they are ignored. Applied at **agent create**, not on follow-up `send()`.
 
@@ -221,7 +223,7 @@ Stream: `text/event-stream`. Frames are `data: <json>\n\n` (no `event:` name), t
 5. if `stream_options.include_usage` was true: one more chunk with `choices: []` and a populated `usage` (same values as the non-stream `usage` field) — sent after the finish chunk (step 3 or 4) regardless of `finish_reason`
 6. `[DONE]`
 
-If `wait()` returns `error`, skip the stop chunk and emit `data: { error: { message, type: "internal_error", code: "run_failed" } }` then `[DONE]` (no usage chunk in this case). Non-stream failed runs are **500** instead.
+If `wait()` returns `error`, skip the stop chunk and emit `data: { error: { message, type: "internal_error", code } }` then `[DONE]` (no usage chunk in this case) — `code` is the SDK's own `wait()` error code when present, else `"run_failed"`. Non-stream failed runs are **500** instead.
 
 Follow-up: last messages with `role: "tool"` + `tool_call_id` **resolve** the parked `execute()`; they are **not** `agent.send()`. Resolution relies **exclusively** on `tool_call_id` — no session id field (`session_id` / `cursor_session_id` / `X-Cursor-Session-Id` / `X-Session-Id`) is read for this at all, not even as a first-choice fast path: a present-but-wrong/irrelevant session id on the same request is ignored rather than hijacking or blocking the resume. The caller's own sessions are searched for one parked on the given `tool_call_id`; no live match (evicted session, restarted proxy, or the id never existed) → a fresh agent is created and the full history — including the tool call and its result — is replayed as its prompt, instead of erroring. A `tool_call_id` the matched session doesn't recognize → **400** `Unknown call_id`. A new user turn while parked → **409** `{ code: "requires_action" }`.
 

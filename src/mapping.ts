@@ -390,7 +390,7 @@ export function toResponseObject(opts: {
   previousResponseId?: string | null;
   usage?: TokenUsage;
   createdAt?: number;
-  error?: { message: string };
+  error?: { message: string; code?: string };
   toolCalls?: readonly PendingToolCall[];
 }) {
   const output: Array<Record<string, unknown>> = [];

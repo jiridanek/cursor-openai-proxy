@@ -19,7 +19,7 @@ export type RunOutcome = {
   status: "finished" | "error" | "cancelled";
   result?: string;
   usage?: TokenUsage;
-  error?: { message: string };
+  error?: { message: string; code?: string };
 };
 
 export type StreamEvent =

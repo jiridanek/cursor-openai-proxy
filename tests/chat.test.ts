@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { HttpError } from "../src/http/errors.ts";
 import { FakeCursorBackend } from "./helpers/fakeBackend.ts";
 import {
   hostedConfig,
@@ -209,6 +210,42 @@ describe("POST /v1/chat/completions", () => {
         code: "run_failed",
         message:
           "Model Blocked This model has been blocked by your team admin settings.",
+      },
+    });
+  });
+
+  it("forwards the SDK's own error code instead of the generic run_failed fallback", async () => {
+    const backend = new FakeCursorBackend({
+      runError: { message: "Model Blocked", code: "model_blocked" },
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "What is 3+4?" }],
+    });
+    expect(res.status).toBe(500);
+    expect(await jsonOf<{ error: { message: string; code: string } }>(res)).toMatchObject({
+      error: { code: "model_blocked", message: "Model Blocked" },
+    });
+  });
+
+  it("returns the SDK-class-implied status for a rejected model instead of blanket 500", async () => {
+    const backend = new FakeCursorBackend();
+    backend.createAgent = async () => {
+      throw new HttpError(400, "Cannot use this model: baf.", {
+        type: "invalid_request_error",
+        code: null,
+      });
+    };
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      model: "baf",
+      messages: [{ role: "user", content: "hi" }],
+    });
+    expect(res.status).toBe(400);
+    expect(await jsonOf<{ error: { message: string; type: string } }>(res)).toMatchObject({
+      error: {
+        type: "invalid_request_error",
+        message: "Cannot use this model: baf.",
       },
     });
   });

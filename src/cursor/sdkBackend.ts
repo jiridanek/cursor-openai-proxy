@@ -1,4 +1,15 @@
-import { Agent, Cursor, type SDKCustomTool } from "@cursor/sdk";
+import {
+  Agent,
+  AgentBusyError,
+  AuthenticationError,
+  ConfigurationError,
+  Cursor,
+  CursorSdkError,
+  NetworkError,
+  RateLimitError,
+  type SDKCustomTool,
+} from "@cursor/sdk";
+import { HttpError } from "../http/errors.ts";
 import type {
   AgentHandle,
   CreateAgentOptions,
@@ -9,6 +20,50 @@ import type {
   RunOutcome,
   StreamEvent,
 } from "./backend.ts";
+
+// The Cursor SDK throws typed errors for problems it can classify up front
+// (bad model id, bad API key, rate limits, ...) synchronously out of
+// `Agent.create()`/`agent.send()`. Its own error classes already carry the
+// intended HTTP status semantics (see @cursor/sdk's errors.d.ts doc
+// comments), but the instances themselves don't reliably set `.status` --
+// map by class instead of trusting the field.
+function mapSdkError(err: unknown): HttpError | undefined {
+  if (!(err instanceof CursorSdkError)) return undefined;
+  if (err instanceof AuthenticationError) {
+    return new HttpError(401, err.message, {
+      type: "invalid_request_error",
+      code: err.code ?? null,
+    });
+  }
+  if (err instanceof RateLimitError) {
+    return new HttpError(429, err.message, {
+      type: "invalid_request_error",
+      code: err.code ?? null,
+    });
+  }
+  if (err instanceof ConfigurationError) {
+    return new HttpError(400, err.message, {
+      type: "invalid_request_error",
+      code: err.code ?? null,
+    });
+  }
+  if (err instanceof AgentBusyError) {
+    return new HttpError(409, err.message, {
+      type: "invalid_request_error",
+      code: err.code ?? null,
+    });
+  }
+  if (err instanceof NetworkError) {
+    return new HttpError(503, err.message, {
+      type: "internal_error",
+      code: err.code ?? null,
+    });
+  }
+  return new HttpError(500, err.message, {
+    type: "internal_error",
+    code: err.code ?? null,
+  });
+}
 
 type SdkRun = Awaited<
   ReturnType<Awaited<ReturnType<typeof Agent.create>>["send"]>
@@ -95,11 +150,15 @@ function wrapAgent(agent: SdkAgent): AgentHandle {
     agentId: agent.agentId,
     async send(prompt, options) {
       const customTools = toSdkCustomTools(options?.customTools);
-      const run = await agent.send(
-        prompt,
-        customTools ? { local: { customTools } } : undefined,
-      );
-      return wrapRun(run);
+      try {
+        const run = await agent.send(
+          prompt,
+          customTools ? { local: { customTools } } : undefined,
+        );
+        return wrapRun(run);
+      } catch (err) {
+        throw mapSdkError(err) ?? err;
+      }
     },
     async close() {
       await agent[Symbol.asyncDispose]();
@@ -165,16 +224,20 @@ export class SdkCursorBackend implements CursorBackend {
   }
 
   async createAgent(options: CreateAgentOptions): Promise<AgentHandle> {
-    const agent = await Agent.create({
-      apiKey: options.apiKey,
-      model: {
-        id: options.model,
-        params: options.params,
-      },
-      mode: options.mode === "ask" ? undefined : options.mode,
-      tools: options.tools,
-      local: { cwd: options.workspace, settingSources: [] },
-    });
-    return wrapAgent(agent);
+    try {
+      const agent = await Agent.create({
+        apiKey: options.apiKey,
+        model: {
+          id: options.model,
+          params: options.params,
+        },
+        mode: options.mode === "ask" ? undefined : options.mode,
+        tools: options.tools,
+        local: { cwd: options.workspace, settingSources: [] },
+      });
+      return wrapAgent(agent);
+    } catch (err) {
+      throw mapSdkError(err) ?? err;
+    }
   }
 }
