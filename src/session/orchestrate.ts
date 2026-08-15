@@ -171,17 +171,27 @@ export async function resolveChatSession(opts: {
     // erroring, same as an unrecognized explicit session id already does
     // below: start a fresh agent and replay the whole conversation -- tool
     // calls and their results included (see mapping.ts flattenMessages).
-    const record = await createChatSession({
-      backend: opts.backend,
-      registry: opts.registry,
-      config: opts.config,
-      callerKeyHash: opts.callerKeyHash,
-      apiKey: opts.apiKey,
-      model: opts.model,
-      effort,
-      fast,
-      passThroughTools: passThrough,
-    });
+    // dedupeInFlight() collapses two concurrent requests racing into this
+    // same branch (e.g. a client retry landing before the first attempt's
+    // agent creation resolves) onto one factory call, keyed by the exact
+    // set of call_ids neither found a live match for -- without aliasing
+    // the result as a durable handle the way getOrCreate() does, since this
+    // key is a coincidental match on one retry, not a session id meant to
+    // be reused.
+    const fallbackKey = `${opts.callerKeyHash}:toolfallback:${[...outputIds].sort().join(",")}`;
+    const record = await opts.registry.dedupeInFlight(fallbackKey, () =>
+      createChatSession({
+        backend: opts.backend,
+        registry: opts.registry,
+        config: opts.config,
+        callerKeyHash: opts.callerKeyHash,
+        apiKey: opts.apiKey,
+        model: opts.model,
+        effort,
+        fast,
+        passThroughTools: passThrough,
+      }),
+    );
     return { record, prompt: flattenMessages(opts.body.messages) };
   }
 

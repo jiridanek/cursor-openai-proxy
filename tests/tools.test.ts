@@ -64,6 +64,44 @@ describe("concurrent session creation", () => {
     expect(second.status).toBe(200);
     expect(backend.creates).toBe(1);
   });
+
+  it("dedupes two concurrent tool-output fallback requests for the same unmatched call_id", async () => {
+    // resolveChatSession()'s tool-output fallback branch (no live session
+    // parked on the submitted call_id -- here, one that was never parked at
+    // all) used to call createChatSession() directly with no protection
+    // against two concurrent requests racing into it, unlike the plain-text
+    // new-session path above (which dedupes via getOrCreate()). Both would
+    // independently find no match and each spin up a separate agent.
+    const backend = new FakeCursorBackend({ reply: "ok" });
+    const { app } = makeApp(backend);
+
+    const body = {
+      tools: [ADD_TOOL],
+      messages: [
+        { role: "user", content: "add 3 and 4" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_ghost",
+              type: "function",
+              function: { name: "add", arguments: '{"a":3,"b":4}' },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_ghost", content: "7" },
+      ],
+    };
+
+    const [first, second] = await Promise.all([
+      postJson(app, "/v1/chat/completions", body),
+      postJson(app, "/v1/chat/completions", body),
+    ]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(backend.creates).toBe(1);
+  });
 });
 
 describe("OpenAI tool pass-through", () => {

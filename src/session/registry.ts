@@ -65,6 +65,7 @@ export class SessionRegistry {
   readonly #byKey = new Map<string, SessionRecord>();
   readonly #ids = new Map<string, Set<string>>();
   readonly #creating = new Map<string, Promise<SessionRecord>>();
+  readonly #inFlight = new Map<string, Promise<SessionRecord>>();
 
   get(callerKeyHash: string, id: string): SessionRecord | undefined {
     return this.#byKey.get(sessionKey(callerKeyHash, id));
@@ -96,6 +97,28 @@ export class SessionRegistry {
         this.#creating.delete(key);
       });
     this.#creating.set(key, promise);
+    return promise;
+  }
+
+  /**
+   * Share a single in-flight `factory` call among concurrent callers keyed by
+   * `key`, without registering the result under that key for later lookup --
+   * unlike getOrCreate(), which permanently aliases its result for a durable
+   * session handle (a client-supplied sticky id, meant to be reused forever).
+   * This is for collapsing a race window on a key that's only a coincidental
+   * match (e.g. the same set of stale/unknown call_ids from two concurrent
+   * retries), not a handle worth keeping around: once the in-flight promise
+   * settles, a later caller with the same key runs its own fresh factory
+   * rather than reusing a since-completed result.
+   */
+  async dedupeInFlight(
+    key: string,
+    factory: () => Promise<SessionRecord>,
+  ): Promise<SessionRecord> {
+    const pending = this.#inFlight.get(key);
+    if (pending) return pending;
+    const promise = factory().finally(() => this.#inFlight.delete(key));
+    this.#inFlight.set(key, promise);
     return promise;
   }
 
