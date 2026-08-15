@@ -145,6 +145,52 @@ describe("POST /v1/chat/completions", () => {
     });
   });
 
+  it("returns 500 when the Cursor run fails", async () => {
+    const backend = new FakeCursorBackend({
+      runError: {
+        message:
+          "Model Blocked This model has been blocked by your team admin settings.",
+      },
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "What is 3+4?" }],
+    });
+    expect(res.status).toBe(500);
+    expect(await jsonOf<{ error: { message: string; code: string } }>(res)).toMatchObject({
+      error: {
+        code: "run_failed",
+        message:
+          "Model Blocked This model has been blocked by your team admin settings.",
+      },
+    });
+  });
+
+  it("includes the run error in streaming chat instead of an empty stop", async () => {
+    const backend = new FakeCursorBackend({
+      runError: { message: "Model Blocked" },
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      stream: true,
+      messages: [{ role: "user", content: "What is 3+4?" }],
+    });
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("Model Blocked");
+    expect(body).toContain("run_failed");
+    expect(body).not.toContain('"finish_reason":"stop"');
+  });
+
+  it("defaults model to auto when omitted", async () => {
+    const { app } = makeApp(new FakeCursorBackend({ reply: "7" }));
+    const res = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "What is 3+4?" }],
+    });
+    expect(res.status).toBe(200);
+    expect(await jsonOf<{ model: string }>(res)).toMatchObject({ model: "auto" });
+  });
+
   it("returns 400 for n>1", async () => {
     const { app } = makeApp();
     const res = await postJson(app, "/v1/chat/completions", {
@@ -166,5 +212,17 @@ describe("POST /v1/chat/completions", () => {
     expect(body.object).toBe("text_completion");
     expect(body.choices[0]?.text).toBe("ok");
     expect(backend.sends[0]?.prompt).toBe("ping");
+  });
+
+  it("returns 500 when a completions run fails", async () => {
+    const backend = new FakeCursorBackend({
+      runError: { message: "Model Blocked" },
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/completions", { prompt: "What is 3+4?" });
+    expect(res.status).toBe(500);
+    expect(await jsonOf<{ error: { code: string; message: string } }>(res)).toMatchObject({
+      error: { code: "run_failed", message: "Model Blocked" },
+    });
   });
 });

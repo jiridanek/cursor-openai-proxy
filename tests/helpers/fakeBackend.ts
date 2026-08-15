@@ -13,6 +13,7 @@ export type FakeOptions = {
   reply?: string | ((prompt: string) => string);
   deltas?: string[];
   hangUntilCancel?: boolean;
+  runError?: { message: string };
 };
 
 export class FakeCursorBackend implements CursorBackend {
@@ -78,6 +79,7 @@ class FakeRun implements RunHandle {
       await this.#untilCancelled();
       return;
     }
+    if (this.options.runError) return;
     const deltas = this.options.deltas ?? [this.#reply()];
     for (const delta of deltas) {
       if (this.#cancelled) return;
@@ -91,6 +93,9 @@ class FakeRun implements RunHandle {
       return { status: "cancelled", result: "" };
     }
     if (this.#cancelled) return { status: "cancelled", result: "" };
+    if (this.options.runError) {
+      return { status: "error", error: this.options.runError };
+    }
     return {
       status: "finished",
       result: this.#reply(),

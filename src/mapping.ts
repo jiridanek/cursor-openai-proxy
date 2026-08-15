@@ -4,7 +4,7 @@ import type { ChatMessage } from "./http/schemas.ts";
 import { newId, nowSeconds } from "./ids.ts";
 import type { TokenUsage } from "./cursor/backend.ts";
 
-export const DEFAULT_MODEL = "composer-2.5";
+export const DEFAULT_MODEL = "auto";
 
 const IGNORED_SAMPLING = [
   "temperature",
@@ -227,6 +227,7 @@ export function toResponseObject(opts: {
   previousResponseId?: string | null;
   usage?: TokenUsage;
   createdAt?: number;
+  error?: { message: string };
 }) {
   return {
     id: opts.id,
@@ -245,6 +246,7 @@ export function toResponseObject(opts: {
       },
     ],
     usage: toResponseUsage(opts.usage),
+    ...(opts.error ? { error: opts.error } : {}),
   };
 }
 

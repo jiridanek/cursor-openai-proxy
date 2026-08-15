@@ -19,6 +19,7 @@ export type RunOutcome = {
   status: "finished" | "error" | "cancelled";
   result?: string;
   usage?: TokenUsage;
+  error?: { message: string };
 };
 
 export type RunHandle = {

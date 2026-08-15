@@ -2,7 +2,7 @@ import { Arbitrary, FastCheck, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import { HttpError } from "../src/http/errors.ts";
 import { ChatCompletion, ChatCompletionRequest } from "../src/http/schemas.ts";
-import { flattenMessages, toChatCompletion } from "../src/mapping.ts";
+import { flattenMessages, toChatCompletion, DEFAULT_MODEL } from "../src/mapping.ts";
 import { FakeCursorBackend } from "./helpers/fakeBackend.ts";
 import { jsonOf, makeApp, postJson } from "./helpers/app.ts";
 
@@ -20,7 +20,7 @@ describe("schema property tests", () => {
           throw err;
         }
         const completion = toChatCompletion({
-          model: request.model || "composer-2.5",
+          model: request.model || DEFAULT_MODEL,
           text,
         });
         const decoded = Schema.decodeUnknownSync(ChatCompletion)(completion);

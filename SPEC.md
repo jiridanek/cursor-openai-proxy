@@ -4,7 +4,7 @@ This document is the behavioral contract for `tools/cursor-openai-proxy`. It des
 
 The proxy is an **Ollama-style OpenAI `/v1` server** plus **stateful Responses**. It is **not** a raw completions model. Every generation request becomes one Cursor **local agent run**. Inference still uses Cursor-hosted models; “local” means the agent loop and workspace files stay on this machine.
 
-Default model id: `composer-2.5`. Default bind: `127.0.0.1:11434`.
+Default model id: `auto`. Default bind: `127.0.0.1:11434`.
 
 ---
 
@@ -110,7 +110,7 @@ Unhandled exceptions → **500** `{ type: "internal_error", code: "internal" }`.
 
 Unimplemented features use **501** `{ code: "unsupported" }` unless noted.
 
-Default `model` when omitted or blank: `composer-2.5`.
+Default `model` when omitted or blank: `auto`. A model id that appears in `GET /v1/models` can still fail at run time (for example team admin blocks). Chat Completions and Completions then return **500** `{ error: { type: "internal_error", code: "run_failed", message } }` with the Cursor `wait()` error. Responses stay **200** with `status: "failed"` and `error: { message }`.
 
 `reasoning_effort` (chat) and `reasoning_effort` / `reasoning.effort` (responses) are mapped onto `model.params` **only** when `Cursor.models.list()` reports a parameter id `effort` or `reasoning_effort` that includes the requested value. Otherwise they are ignored. Applied at **agent create**, not on follow-up `send()`.
 
@@ -141,7 +141,7 @@ Request (Effect Schema; extra fields ignored):
 | Field | Required | Notes |
 |---|---|---|
 | `messages` | yes | array of `{ role, content?, name? }` |
-| `model` | no | default `composer-2.5` |
+| `model` | no | default `auto` |
 | `stream` | no | SSE if true |
 | `n` | no | only `1` or omitted; else **400** |
 | `tools` | no | if present → **501** |
@@ -180,6 +180,8 @@ Stream: `text/event-stream`. Frames are `data: <json>\n\n` (no `event:` name), t
 3. stop chunk: `delta: {}`, `finish_reason: "stop"`
 4. `[DONE]`
 
+If `wait()` returns `error`, skip the stop chunk and emit `data: { error: { message, type: "internal_error", code: "run_failed" } }` then `[DONE]`. Non-stream failed runs are **500** instead.
+
 Only assistant **text** deltas are forwarded. Cursor tool-call internals are not emitted as content.
 
 #### Chat session modes
@@ -213,7 +215,7 @@ Stream: `text_completion` chunks with `choices[0].text` deltas, then a stop chun
 | Field | Required | Notes |
 |---|---|---|
 | `input` | yes | string, or array of text items |
-| `model` | no | default `composer-2.5` |
+| `model` | no | default `auto` |
 | `instructions` | no | prepended as `system: …\n` on **first** create only |
 | `previous_response_id` | no | follow-up: `send()` only new `input` |
 | `store` | no | default `true`; `false` = ephemeral |
@@ -246,7 +248,7 @@ Non-stream **200** (enough for `client.responses.create()` / `.output_text`):
 }
 ```
 
-`status` may be `completed`, `cancelled`, or `failed` after the run.
+`status` may be `completed`, `cancelled`, or `failed` after the run. Failed runs include `error: { message }` from Cursor `wait()`.
 
 Stream (`event:` + `data:`):
 

@@ -40,13 +40,13 @@ client = OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="ollama")
 client = OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="crsr_...")
 
 print(client.chat.completions.create(
-    model="composer-2.5",
+    model="auto",
     messages=[{"role": "user", "content": "What is 3+4?"}],
 ).choices[0].message.content)
 
-r1 = client.responses.create(model="composer-2.5", input="What is 3+4?")
+r1 = client.responses.create(model="auto", input="What is 3+4?")
 r2 = client.responses.create(
-    model="composer-2.5",
+    model="auto",
     input="Why?",
     previous_response_id=r1.id,
 )

@@ -78,6 +78,15 @@ function responseFromRecord(
     previousResponseId: record.previousResponseId,
     createdAt: extra?.createdAt ?? record.createdAt,
     usage: record.usage,
+    error: extra?.status === "in_progress" ? undefined : record.error,
+  });
+}
+
+function chatRunError(record: SessionRecord): HttpError | undefined {
+  if (record.status !== "failed") return undefined;
+  return new HttpError(500, record.error?.message ?? "Agent run failed", {
+    type: "internal_error",
+    code: "run_failed",
   });
 }
 
@@ -168,6 +177,12 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
             chatDeltaChunk(completionId, created, model, delta),
           );
         });
+        const failed = chatRunError(record);
+        if (failed) {
+          await writeJsonSse(stream, openaiErrorBody(failed));
+          await writeDone(stream);
+          return;
+        }
         aliasPrefixSession(
           config,
           registry,
@@ -183,6 +198,8 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
     }
 
     const text = await runSession(record, prompt);
+    const failed = chatRunError(record);
+    if (failed) throw failed;
     aliasPrefixSession(
       config,
       registry,
@@ -227,6 +244,12 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
             completionsDeltaChunk(completionId, created, model, delta),
           );
         });
+        const failed = chatRunError(record);
+        if (failed) {
+          await writeJsonSse(stream, openaiErrorBody(failed));
+          await writeDone(stream);
+          return;
+        }
         await writeJsonSse(
           stream,
           completionsStopChunk(completionId, created, model),
@@ -236,6 +259,8 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
     }
 
     const text = await runSession(record, prompt);
+    const failed = chatRunError(record);
+    if (failed) throw failed;
     return c.json(
       toTextCompletion({
         id: completionId,

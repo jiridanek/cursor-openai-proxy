@@ -41,6 +41,7 @@ export type SessionRecord = {
   previousResponseId: string | null;
   stored: boolean;
   usage?: TokenUsage;
+  error?: { message: string };
 };
 
 function sessionKey(callerKeyHash: string, id: string): string {

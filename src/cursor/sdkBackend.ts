@@ -35,6 +35,7 @@ function wrapRun(run: SdkRun): RunHandle {
               totalTokens: result.usage.totalTokens,
             }
           : undefined,
+        error: result.error,
       };
     },
     async cancel() {

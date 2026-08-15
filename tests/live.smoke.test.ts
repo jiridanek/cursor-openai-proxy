@@ -18,7 +18,7 @@ describe.skipIf(!live)("live smoke", () => {
 
   it("answers 3+4 over chat completions", async () => {
     const res = await postJson(app, "/v1/chat/completions", {
-      model: "composer-2.5",
+      model: process.env.LIVE_SMOKE_MODEL ?? "auto",
       messages: [
         { role: "user", content: "What is 3+4? Reply with just the number." },
       ],
@@ -32,7 +32,7 @@ describe.skipIf(!live)("live smoke", () => {
 
   it("chains Responses 3+4 then why", async () => {
     const first = await postJson(app, "/v1/responses", {
-      model: "composer-2.5",
+      model: process.env.LIVE_SMOKE_MODEL ?? "auto",
       input: "What is 3+4? Reply with just the number.",
     });
     expect(first.status).toBe(200);

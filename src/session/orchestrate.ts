@@ -182,6 +182,7 @@ export async function resolveResponseSession(opts: {
       status: "in_progress",
       outputText: "",
       usage: undefined,
+      error: undefined,
       createdAt: opts.createdAt,
       stored: opts.store,
       activeRun: undefined,
@@ -230,9 +231,16 @@ function applyOutcome(
 ): void {
   record.outputText = outcome.result ?? text;
   record.usage = outcome.usage;
-  if (outcome.status === "cancelled") record.status = "cancelled";
-  else if (outcome.status === "error") record.status = "failed";
-  else record.status = "completed";
+  if (outcome.status === "cancelled") {
+    record.status = "cancelled";
+    record.error = undefined;
+  } else if (outcome.status === "error") {
+    record.status = "failed";
+    record.error = outcome.error ?? { message: "Agent run failed" };
+  } else {
+    record.status = "completed";
+    record.error = undefined;
+  }
 }
 
 export async function runSession(

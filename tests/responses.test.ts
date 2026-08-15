@@ -67,6 +67,43 @@ describe("POST /v1/responses", () => {
     expect(get.status).toBe(404);
   });
 
+  it("returns failed Responses with the Cursor error message", async () => {
+    const backend = new FakeCursorBackend({
+      runError: {
+        message:
+          "Model Blocked This model has been blocked by your team admin settings.",
+      },
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/responses", {
+      input: "What is 3+4?",
+    });
+    expect(res.status).toBe(200);
+    const body = await jsonOf<{
+      id: string;
+      status: string;
+      error: { message: string };
+      output: Array<{ content: Array<{ text: string }> }>;
+    }>(res);
+    expect(body.status).toBe("failed");
+    expect(body.error.message).toBe(
+      "Model Blocked This model has been blocked by your team admin settings.",
+    );
+    expect(body.output[0]?.content[0]?.text).toBe("");
+
+    const stored = await app.request(`/v1/responses/${body.id}`, {
+      headers: authHeaders(),
+    });
+    expect(stored.status).toBe(200);
+    expect(await jsonOf<{ status: string; error: { message: string } }>(stored)).toMatchObject({
+      status: "failed",
+      error: {
+        message:
+          "Model Blocked This model has been blocked by your team admin settings.",
+      },
+    });
+  });
+
   it("GET /v1/responses/{id} returns stored output", async () => {
     const { app } = makeApp(new FakeCursorBackend({ reply: "stored" }));
     const createdRes = await postJson(app, "/v1/responses", {
