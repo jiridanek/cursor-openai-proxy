@@ -374,6 +374,62 @@ describe("OpenAI tool pass-through", () => {
     expect(backend.creates).toBe(1); // true resume, not a new agent
   });
 
+  it("resumes the correct parked call by tool_call_id, ignoring a wrong-but-present session id", async () => {
+    // Two sessions exist for the same caller: session A is a plain,
+    // already-completed text conversation under an explicit client-chosen
+    // id; session B is unrelated, created separately (server-generated id,
+    // never captured by the client) with a genuinely parked tool call. A
+    // follow-up that (by mistake, or because the client never tracked
+    // session ids at all) sends session A's id alongside the correct
+    // tool_call_id for session B's pending call must resume B -- not get
+    // silently absorbed into continuing A, which would discard the tool
+    // output entirely and just re-park a brand new call on A instead.
+    const backend = new FakeCursorBackend({
+      reply: "hello",
+      toolCall: {
+        name: "add",
+        arguments: { a: 9, b: 9 },
+        id: "call_b",
+        finalReply: (output) => `sum=${output}`,
+      },
+    });
+    const { app } = makeApp(backend);
+
+    await postJson(app, "/v1/chat/completions", {
+      session_id: "sess_a",
+      messages: [{ role: "user", content: "hi" }],
+    });
+
+    const createB = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "add" }],
+      tools: [ADD_TOOL],
+    });
+    const parkedB = await jsonOf<{
+      choices: Array<{ message: { tool_calls: Array<{ id: string }> } }>;
+    }>(createB);
+
+    const res = await postJson(app, "/v1/chat/completions", {
+      session_id: "sess_a", // wrong -- irrelevant to session B's call
+      tools: [ADD_TOOL],
+      messages: [
+        { role: "user", content: "add" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: parkedB.choices[0]!.message.tool_calls,
+        },
+        { role: "tool", tool_call_id: "call_b", content: "18" },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const done = await jsonOf<{
+      choices: Array<{ finish_reason: string; message: { content: string } }>;
+    }>(res);
+    expect(done.choices[0]?.finish_reason).toBe("stop");
+    expect(done.choices[0]?.message.content).toBe("sum=18");
+    expect(backend.creates).toBe(2); // session A + session B, no third agent
+  });
+
   it("returns 400 for prefix mode plus tools", async () => {
     const { app } = makeApp(
       new FakeCursorBackend(),

@@ -10,7 +10,7 @@ Cursor’s models are only available through a local agent; ToS requires that ag
 
 **Is not:** LiteLLM, raw token completions, or an autonomous coding agent you point at a repo. `temperature`, `max_tokens`, and JSON mode (`response_format`) are ignored. Expect agent-loop latency, not a 30-token completion.
 
-Client `tools` replace `read` / `grep` / `shell` on purpose (minimize the agent). Re-expose repo ops as client tools if you need both. Chat Completions is compatibility: capture `X-Cursor-Session-Id` (required for tool follow-ups because the same agent `Run` must continue). **Responses** (`previous_response_id`) is the native session handle. `--agent-mode plan` / `agent` widens the agent (shell, edits); that is opt-in, against the default of minimizing it.
+Client `tools` replace `read` / `grep` / `shell` on purpose (minimize the agent). Re-expose repo ops as client tools if you need both. Chat Completions is compatibility: tool follow-ups resolve by `tool_call_id` alone (standard OpenAI tool-calling protocol) — no need to capture `X-Cursor-Session-Id`, which is only useful for reusing the live agent across plain-text turns. **Responses** (`previous_response_id`) is the native session handle. `--agent-mode plan` / `agent` widens the agent (shell, edits); that is opt-in, against the default of minimizing it.
 
 ## Setup
 
@@ -76,7 +76,7 @@ The proxy caller decides what may run. Do not “turn on safety” by adding `au
 
 Ambient Cursor MCP (`~/.cursor/mcp.json`, project `.cursor/mcp.json`, plugins) is never loaded: every agent uses `settingSources: []` and no `mcpServers`. Only tools supplied on the HTTP request are available.
 
-Chat tool loops need **sticky** sessions (`X-Cursor-Session-Id`) because the same agent `Run` must continue. Prefix session mode rejects `tools`. Responses tool loops use `previous_response_id` plus `function_call_output` items; `store: false` cannot be combined with tools.
+Chat tool follow-ups resolve by the `tool_call_id` the client already echoes back — no proxy-specific session id needed; that's what lets a plain OpenAI-compatible client complete a tool-calling round with zero awareness of this proxy's extensions. Creating a *new* tool-using conversation still needs **sticky** mode, since prefix mode rejects `tools` (an agent's tool permissions are fixed at creation time). Responses tool loops use `previous_response_id` plus `function_call_output` items; `store: false` cannot be combined with tools. Full resolution order: [SPEC.md](SPEC.md).
 
 ### CLI flags
 
@@ -105,7 +105,7 @@ Not implemented (501): embeddings, vision, `/v1/completions`, non-function tool 
 
 ### Chat session modes
 
-`--session-mode sticky` (default): reuse `extra_body.session_id` / `cursor_session_id` or headers `X-Cursor-Session-Id` / `X-Session-Id`. If absent, create an agent and return the id in `X-Cursor-Session-Id`. Follow-ups `send()` only the latest user turn. Tool-result follow-ups must send that id and `role: "tool"` messages (same live `Run`).
+`--session-mode sticky` (default): a tool-result follow-up (trailing `role: "tool"` message(s)) resolves by `tool_call_id` alone — no session id involved at all. Otherwise (plain-text turns): reuse `extra_body.session_id` / `cursor_session_id` or headers `X-Cursor-Session-Id` / `X-Session-Id`. If absent, create an agent and return the id in `X-Cursor-Session-Id`. Follow-ups `send()` only the latest user turn.
 
 `--session-mode prefix`: hash `messages[:-1]` + model + workspace. Same prefix reuses the agent; a history change starts a new one. Cannot be combined with OpenAI `tools`.
 

@@ -125,33 +125,21 @@ export async function resolveChatSession(opts: {
     );
   }
 
-  const lookupId =
-    opts.config.sessionMode === "prefix"
-      ? opts.body.messages.length > 1
-        ? prefixSessionId(
-            opts.body.messages,
-            opts.model,
-            opts.config.workspace,
-          )
-        : undefined
-      : stickyId;
-
-  let existing = lookupId
-    ? opts.registry.get(opts.callerKeyHash, lookupId)
-    : undefined;
-
-  if (!existing && toolOutputs.length > 0) {
-    // The client didn't supply (or its id didn't match) an explicit session
-    // id, but every OpenAI-compliant client is already required by the base
-    // tool-calling protocol to echo the exact tool_call_id back on its
-    // result -- use that to find the live parked Run without needing any
-    // proxy-specific header.
+  if (toolOutputs.length > 0) {
+    // Resuming a parked tool call relies exclusively on tool_call_id --
+    // every OpenAI-compliant client is already required to echo it back on
+    // its role:"tool" message, that's core protocol, not a proxy extension.
+    // No session id (cursor_session_id / session_id / X-Cursor-Session-Id /
+    // X-Session-Id) is consulted here at all, not even as a first-choice
+    // fast path: a present-but-wrong id must not be able to hijack or block
+    // the correct resume (see tests/tools.test.ts for the scenario this
+    // guards against).
     const outputIds = new Set(toolOutputs.map((output) => output.callId));
-    existing = opts.registry.findByPendingCall(opts.callerKeyHash, outputIds);
-  }
-
-  if (existing) {
-    if (existing.status === "requires_action") {
+    const existing = opts.registry.findByPendingCall(
+      opts.callerKeyHash,
+      outputIds,
+    );
+    if (existing) {
       const pendingIds = new Set(
         (existing.pendingToolCalls ?? []).map((call) => call.callId),
       );
@@ -169,10 +157,54 @@ export async function resolveChatSession(opts: {
         resume: { outputs: relevantOutputs },
       };
     }
-    return { record: existing, prompt: lastUserText(opts.body.messages) };
+    // No live Run parked anywhere for this call_id: it was evicted, the
+    // proxy restarted, or the id never existed. Degrade instead of
+    // erroring, same as an unrecognized explicit session id already does
+    // below: start a fresh agent and replay the whole conversation -- tool
+    // calls and their results included (see mapping.ts flattenMessages).
+    const record = await createChatSession({
+      backend: opts.backend,
+      registry: opts.registry,
+      config: opts.config,
+      callerKeyHash: opts.callerKeyHash,
+      apiKey: opts.apiKey,
+      model: opts.model,
+      effort,
+      passThroughTools: passThrough,
+    });
+    return { record, prompt: flattenMessages(opts.body.messages) };
   }
 
+  // No tool outputs to resolve: an ordinary or continuing plain-text turn.
+  // This is the only remaining path that reads a session id -- resuming a
+  // live agent here is a pure efficiency/context optimization (skip
+  // resending full history), not something with any standard-protocol
+  // substitute, so it keeps using the proxy's own sticky-id/prefix-hash
+  // mechanism.
+  const lookupId =
+    opts.config.sessionMode === "prefix"
+      ? opts.body.messages.length > 1
+        ? prefixSessionId(
+            opts.body.messages,
+            opts.model,
+            opts.config.workspace,
+          )
+        : undefined
+      : stickyId;
+
   if (lookupId) {
+    const existing = opts.registry.get(opts.callerKeyHash, lookupId);
+    if (existing) {
+      if (existing.status === "requires_action") {
+        // toolOutputs is empty (handled above), so this can only be a new
+        // message arriving while a tool call is still parked.
+        throw new HttpError(409, "Session is waiting for tool outputs", {
+          code: "requires_action",
+        });
+      }
+      return { record: existing, prompt: lastUserText(opts.body.messages) };
+    }
+
     // No session exists yet under this id. getOrCreate() dedupes concurrent
     // requests racing to create it: only the first caller's factory actually
     // runs; later callers (in flight before it resolves) share its result
