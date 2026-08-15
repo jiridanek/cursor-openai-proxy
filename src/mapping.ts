@@ -1,10 +1,29 @@
 import { createHash } from "node:crypto";
+import type { AgentMode } from "./config.ts";
 import { HttpError, notImplemented } from "./http/errors.ts";
 import type { ChatMessage } from "./http/schemas.ts";
 import { newId, nowSeconds } from "./ids.ts";
 import type { TokenUsage } from "./cursor/backend.ts";
 
 export const DEFAULT_MODEL = "auto";
+
+export type FunctionToolDef = {
+  name: string;
+  description?: string;
+  parameters?: Record<string, unknown>;
+};
+
+export type FunctionCallOutput = {
+  callId: string;
+  output: string;
+};
+
+export type PendingToolCall = {
+  callId: string;
+  itemId: string;
+  name: string;
+  arguments: string;
+};
 
 const IGNORED_SAMPLING = [
   "temperature",
@@ -23,6 +42,11 @@ export function logIgnoredSampling(body: object): void {
       `cursor-openai-proxy: ignoring sampling knobs: ${present.join(", ")}`,
     );
   }
+  if (rec.tool_choice !== undefined || rec.parallel_tool_calls !== undefined) {
+    console.debug(
+      "cursor-openai-proxy: ignoring tool_choice / parallel_tool_calls",
+    );
+  }
 }
 
 export function requireSingleChoice(n: number | undefined): void {
@@ -31,15 +55,111 @@ export function requireSingleChoice(n: number | undefined): void {
   }
 }
 
-export function rejectToolsAndLogprobs(body: {
-  tools?: unknown;
-  logprobs?: unknown;
-}): void {
-  if (body.tools !== undefined) {
-    throw notImplemented("OpenAI tools");
-  }
+export function rejectLogprobs(body: { logprobs?: unknown }): void {
   if (body.logprobs !== undefined && Boolean(body.logprobs)) {
     throw notImplemented("logprobs");
+  }
+}
+
+export function sdkToolAllowlist(
+  mode: AgentMode,
+  passThrough: boolean,
+): string[] | undefined {
+  if (passThrough) return ["mcp"];
+  if (mode === "ask") return ["read", "grep", "glob", "ls"];
+  return undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return undefined;
+  }
+  return value as Record<string, unknown>;
+}
+
+export function parseFunctionTools(
+  tools: readonly unknown[] | undefined,
+): FunctionToolDef[] | undefined {
+  if (tools === undefined) return undefined;
+  const defs: FunctionToolDef[] = [];
+  for (const tool of tools) {
+    const rec = asRecord(tool);
+    if (!rec) {
+      throw notImplemented("OpenAI tools");
+    }
+    if (rec.type !== "function") {
+      throw notImplemented(
+        `Tool type ${typeof rec.type === "string" ? rec.type : "unknown"}`,
+      );
+    }
+    const fn = asRecord(rec.function);
+    if (fn) {
+      if (typeof fn.name !== "string" || !fn.name) {
+        throw new HttpError(400, "Function tool is missing name");
+      }
+      defs.push({
+        name: fn.name,
+        description: typeof fn.description === "string" ? fn.description : undefined,
+        parameters: asRecord(fn.parameters),
+      });
+      continue;
+    }
+    if (typeof rec.name === "string" && rec.name) {
+      defs.push({
+        name: rec.name,
+        description: typeof rec.description === "string" ? rec.description : undefined,
+        parameters: asRecord(rec.parameters),
+      });
+      continue;
+    }
+    throw new HttpError(400, "Function tool is missing name");
+  }
+  return defs;
+}
+
+export function toolOutputsFromMessages(
+  messages: readonly ChatMessage[],
+): FunctionCallOutput[] {
+  const outputs: FunctionCallOutput[] = [];
+  for (const message of messages) {
+    if (message.role !== "tool") continue;
+    if (!message.tool_call_id) {
+      throw new HttpError(400, "Tool message is missing tool_call_id");
+    }
+    outputs.push({
+      callId: message.tool_call_id,
+      output: flattenContent(message.content),
+    });
+  }
+  return outputs;
+}
+
+export function extractFunctionCallOutputs(
+  input: string | readonly unknown[],
+): FunctionCallOutput[] {
+  if (typeof input === "string") return [];
+  const outputs: FunctionCallOutput[] = [];
+  for (const item of input) {
+    const rec = asRecord(item);
+    if (!rec || rec.type !== "function_call_output") continue;
+    if (typeof rec.call_id !== "string" || !rec.call_id) {
+      throw new HttpError(400, "function_call_output is missing call_id");
+    }
+    outputs.push({
+      callId: rec.call_id,
+      output: typeof rec.output === "string" ? rec.output : stringifyOutput(rec.output),
+    });
+  }
+  return outputs;
+}
+
+function stringifyOutput(value: unknown): string {
+  if (value == null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
   }
 }
 
@@ -103,6 +223,7 @@ export function flattenResponsesInput(
       throw notImplemented("Vision / image inputs");
     }
     const type = rec.type;
+    if (type === "function_call_output") continue;
     if (type === "input_text" && typeof rec.text === "string") {
       parts.push(rec.text);
       continue;
@@ -185,7 +306,32 @@ export function toChatCompletion(opts: {
   text: string;
   usage?: TokenUsage;
   created?: number;
+  toolCalls?: readonly PendingToolCall[];
 }) {
+  if (opts.toolCalls && opts.toolCalls.length > 0) {
+    return {
+      id: opts.id ?? newId("chatcmpl_"),
+      object: "chat.completion" as const,
+      created: opts.created ?? nowSeconds(),
+      model: opts.model,
+      choices: [
+        {
+          index: 0,
+          message: {
+            role: "assistant" as const,
+            content: null,
+            tool_calls: opts.toolCalls.map((call) => ({
+              id: call.callId,
+              type: "function" as const,
+              function: { name: call.name, arguments: call.arguments },
+            })),
+          },
+          finish_reason: "tool_calls" as const,
+        },
+      ],
+      usage: toUsage(opts.usage),
+    };
+  }
   return {
     id: opts.id ?? newId("chatcmpl_"),
     object: "chat.completion" as const,
@@ -195,26 +341,9 @@ export function toChatCompletion(opts: {
       {
         index: 0,
         message: { role: "assistant" as const, content: opts.text },
-        finish_reason: "stop",
+        finish_reason: "stop" as const,
       },
     ],
-    usage: toUsage(opts.usage),
-  };
-}
-
-export function toTextCompletion(opts: {
-  id?: string;
-  model: string;
-  text: string;
-  usage?: TokenUsage;
-  created?: number;
-}) {
-  return {
-    id: opts.id ?? newId("cmpl_"),
-    object: "text_completion" as const,
-    created: opts.created ?? nowSeconds(),
-    model: opts.model,
-    choices: [{ text: opts.text, index: 0, finish_reason: "stop" }],
     usage: toUsage(opts.usage),
   };
 }
@@ -228,7 +357,28 @@ export function toResponseObject(opts: {
   usage?: TokenUsage;
   createdAt?: number;
   error?: { message: string };
+  toolCalls?: readonly PendingToolCall[];
 }) {
+  const output: Array<Record<string, unknown>> = [];
+  if (opts.text || !opts.toolCalls?.length) {
+    output.push({
+      type: "message" as const,
+      id: newId("msg_"),
+      role: "assistant" as const,
+      status: opts.status === "requires_action" ? "completed" : opts.status,
+      content: [{ type: "output_text" as const, text: opts.text }],
+    });
+  }
+  for (const call of opts.toolCalls ?? []) {
+    output.push({
+      type: "function_call" as const,
+      id: call.itemId,
+      call_id: call.callId,
+      name: call.name,
+      arguments: call.arguments,
+      status: "completed",
+    });
+  }
   return {
     id: opts.id,
     object: "response" as const,
@@ -236,15 +386,7 @@ export function toResponseObject(opts: {
     model: opts.model,
     created_at: opts.createdAt ?? nowSeconds(),
     previous_response_id: opts.previousResponseId ?? null,
-    output: [
-      {
-        type: "message" as const,
-        id: newId("msg_"),
-        role: "assistant" as const,
-        status: opts.status,
-        content: [{ type: "output_text" as const, text: opts.text }],
-      },
-    ],
+    output,
     usage: toResponseUsage(opts.usage),
     ...(opts.error ? { error: opts.error } : {}),
   };

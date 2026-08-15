@@ -1,0 +1,352 @@
+import { describe, expect, it } from "vitest";
+import { FakeCursorBackend } from "./helpers/fakeBackend.ts";
+import {
+  authHeaders,
+  hostedConfig,
+  jsonOf,
+  makeApp,
+  normalizeSse,
+  postJson,
+} from "./helpers/app.ts";
+
+const ADD_TOOL = {
+  type: "function",
+  function: {
+    name: "add",
+    description: "Add two numbers",
+    parameters: {
+      type: "object",
+      properties: {
+        a: { type: "number" },
+        b: { type: "number" },
+      },
+      required: ["a", "b"],
+    },
+  },
+};
+
+describe("OpenAI tool pass-through", () => {
+  it("treats empty tools as text-only", async () => {
+    const backend = new FakeCursorBackend({ reply: "ok" });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "hi" }],
+      tools: [],
+    });
+    expect(res.status).toBe(200);
+    expect(await jsonOf<{ choices: Array<{ finish_reason: string }> }>(res)).toMatchObject({
+      choices: [{ finish_reason: "stop" }],
+    });
+    expect(backend.createOptions[0]?.tools).toEqual([
+      "read",
+      "grep",
+      "glob",
+      "ls",
+    ]);
+    expect(backend.sends[0]?.customTools).toBeUndefined();
+  });
+
+  it("does not 501 when chat tools are present", async () => {
+    const backend = new FakeCursorBackend({
+      toolCall: {
+        name: "add",
+        arguments: { a: 3, b: 4 },
+        finalReply: (output) => `sum=${output}`,
+      },
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "add 3 and 4" }],
+      tools: [ADD_TOOL],
+    });
+    expect(res.status).toBe(200);
+    const body = await jsonOf<{
+      choices: Array<{
+        finish_reason: string;
+        message: {
+          content: string | null;
+          tool_calls: Array<{
+            id: string;
+            function: { name: string; arguments: string };
+          }>;
+        };
+      }>;
+    }>(res);
+    expect(body.choices[0]?.finish_reason).toBe("tool_calls");
+    expect(body.choices[0]?.message.content).toBeNull();
+    expect(body.choices[0]?.message.tool_calls[0]?.function.name).toBe("add");
+    expect(backend.createOptions[0]?.tools).toEqual(["mcp"]);
+    expect(backend.sends[0]?.customTools).toEqual(["add"]);
+  });
+
+  it("resumes a sticky chat session from role:tool and returns final text", async () => {
+    const backend = new FakeCursorBackend({
+      toolCall: {
+        name: "add",
+        arguments: { a: 3, b: 4 },
+        id: "call_test",
+        finalReply: (output) => `sum=${output}`,
+      },
+    });
+    const { app } = makeApp(backend);
+    const first = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "add 3 and 4" }],
+      tools: [ADD_TOOL],
+    });
+    const parked = await jsonOf<{
+      choices: Array<{
+        message: { tool_calls: Array<{ id: string }> };
+      }>;
+    }>(first);
+    const sessionId = first.headers.get("X-Cursor-Session-Id");
+    expect(sessionId).toBeTruthy();
+    const callId = parked.choices[0]?.message.tool_calls[0]?.id;
+    const second = await postJson(
+      app,
+      "/v1/chat/completions",
+      {
+        session_id: sessionId,
+        tools: [ADD_TOOL],
+        messages: [
+          { role: "user", content: "add 3 and 4" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: parked.choices[0]?.message.tool_calls,
+          },
+          { role: "tool", tool_call_id: callId, content: "7" },
+        ],
+      },
+    );
+    expect(second.status).toBe(200);
+    const done = await jsonOf<{
+      choices: Array<{ finish_reason: string; message: { content: string } }>;
+    }>(second);
+    expect(done.choices[0]?.finish_reason).toBe("stop");
+    expect(done.choices[0]?.message.content).toBe("sum=7");
+    expect(backend.creates).toBe(1);
+    expect(backend.sends).toHaveLength(1);
+  });
+
+  it("returns 400 when a tool follow-up omits the session id", async () => {
+    const { app } = makeApp(
+      new FakeCursorBackend({
+        toolCall: { name: "add", arguments: { a: 1, b: 2 }, id: "call_test" },
+      }),
+    );
+    await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "add" }],
+      tools: [ADD_TOOL],
+    });
+    const res = await postJson(app, "/v1/chat/completions", {
+      tools: [ADD_TOOL],
+      messages: [
+        { role: "user", content: "add" },
+        { role: "tool", tool_call_id: "call_test", content: "3" },
+      ],
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 400 for prefix mode plus tools", async () => {
+    const { app } = makeApp(
+      new FakeCursorBackend(),
+      hostedConfig({ sessionMode: "prefix" }),
+    );
+    const res = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "add" }],
+      tools: [ADD_TOOL],
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("returns 409 if a user message arrives while tool calls are parked", async () => {
+    const backend = new FakeCursorBackend({
+      toolCall: { name: "add", arguments: { a: 1, b: 2 }, id: "call_test" },
+    });
+    const { app } = makeApp(backend);
+    const first = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "add" }],
+      tools: [ADD_TOOL],
+    });
+    const sessionId = first.headers.get("X-Cursor-Session-Id")!;
+    const res = await postJson(app, "/v1/chat/completions", {
+      session_id: sessionId,
+      messages: [
+        { role: "user", content: "add" },
+        { role: "user", content: "never mind, just say hi" },
+      ],
+    });
+    expect(res.status).toBe(409);
+    expect(await jsonOf<{ error: { code: string } }>(res)).toMatchObject({
+      error: { code: "requires_action" },
+    });
+  });
+
+  it("snapshots chat SSE tool_call deltas", async () => {
+    const backend = new FakeCursorBackend({
+      deltas: ["Let me add. "],
+      toolCall: {
+        name: "add",
+        arguments: { a: 3, b: 4 },
+        id: "call_test",
+      },
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      stream: true,
+      messages: [{ role: "user", content: "add 3 and 4" }],
+      tools: [ADD_TOOL],
+    });
+    expect(res.status).toBe(200);
+    expect(
+      normalizeSse(await res.text(), [
+        [/chatcmpl_[a-f0-9-]+/g, "chatcmpl_ID"],
+        [/"created":\s*\d+/g, '"created": 0'],
+      ]),
+    ).toMatchSnapshot();
+  });
+
+  it("parks Responses as requires_action and completes on function_call_output", async () => {
+    const backend = new FakeCursorBackend({
+      toolCall: {
+        name: "add",
+        arguments: { a: 3, b: 4 },
+        id: "call_test",
+        finalReply: (output) => `sum=${output}`,
+      },
+    });
+    const { app } = makeApp(backend);
+    const first = await postJson(app, "/v1/responses", {
+      input: "add 3 and 4",
+      tools: [
+        {
+          type: "function",
+          name: "add",
+          description: "Add two numbers",
+          parameters: {
+            type: "object",
+            properties: { a: { type: "number" }, b: { type: "number" } },
+          },
+        },
+      ],
+    });
+    expect(first.status).toBe(200);
+    const parked = await jsonOf<{
+      id: string;
+      status: string;
+      output: Array<{ type: string; call_id?: string; name?: string }>;
+    }>(first);
+    expect(parked.status).toBe("requires_action");
+    expect(parked.output.some((item) => item.type === "function_call")).toBe(
+      true,
+    );
+
+    const stored = await app.request(`/v1/responses/${parked.id}`, {
+      headers: authHeaders(),
+    });
+    expect(stored.status).toBe(200);
+    expect(await jsonOf<{ status: string }>(stored)).toMatchObject({
+      status: "requires_action",
+    });
+
+    const second = await postJson(app, "/v1/responses", {
+      previous_response_id: parked.id,
+      input: [
+        { type: "function_call_output", call_id: "call_test", output: "7" },
+      ],
+    });
+    expect(second.status).toBe(200);
+    const done = await jsonOf<{
+      status: string;
+      output: Array<{ content?: Array<{ text: string }> }>;
+    }>(second);
+    expect(done.status).toBe("completed");
+    expect(done.output[0]?.content?.[0]?.text).toBe("sum=7");
+    expect(backend.sends).toHaveLength(1);
+  });
+
+  it("returns 400 for store:false plus tools", async () => {
+    const { app } = makeApp();
+    const res = await postJson(app, "/v1/responses", {
+      input: "add",
+      store: false,
+      tools: [ADD_TOOL],
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("cancels parked tool calls", async () => {
+    const backend = new FakeCursorBackend({
+      toolCall: { name: "add", arguments: { a: 1, b: 2 }, id: "call_test" },
+    });
+    const { app } = makeApp(backend);
+    const first = await postJson(app, "/v1/responses", {
+      input: "add",
+      tools: [ADD_TOOL],
+    });
+    const parked = await jsonOf<{ id: string }>(first);
+    const cancel = await app.request(`/v1/responses/${parked.id}/cancel`, {
+      method: "POST",
+      headers: authHeaders(),
+    });
+    expect(cancel.status).toBe(200);
+    expect(await jsonOf<{ status: string }>(cancel)).toMatchObject({
+      status: "cancelled",
+    });
+  });
+
+  it("snapshots Responses requires_action SSE", async () => {
+    const backend = new FakeCursorBackend({
+      deltas: ["Calling add. "],
+      toolCall: {
+        name: "add",
+        arguments: { a: 3, b: 4 },
+        id: "call_test",
+      },
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/responses", {
+      input: "add 3 and 4",
+      stream: true,
+      tools: [ADD_TOOL],
+    });
+    expect(res.status).toBe(200);
+    expect(
+      normalizeSse(await res.text(), [
+        [/resp_[a-f0-9-]+/g, "resp_ID"],
+        [/msg_[a-f0-9-]+/g, "msg_ID"],
+        [/fc_[a-f0-9-]+/g, "fc_ID"],
+        [/"created_at":\s*\d+/g, '"created_at": 0'],
+      ]),
+    ).toMatchSnapshot();
+  });
+
+  it("returns 501 for non-function tool types", async () => {
+    const { app } = makeApp();
+    const res = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "hi" }],
+      tools: [{ type: "file_search" }],
+    });
+    expect(res.status).toBe(501);
+  });
+
+  it("returns 400 for an unknown tool call_id", async () => {
+    const backend = new FakeCursorBackend({
+      toolCall: { name: "add", arguments: { a: 1, b: 2 }, id: "call_test" },
+    });
+    const { app } = makeApp(backend);
+    const first = await postJson(app, "/v1/responses", {
+      input: "add",
+      tools: [ADD_TOOL],
+    });
+    const parked = await jsonOf<{ id: string }>(first);
+    const res = await postJson(app, "/v1/responses", {
+      previous_response_id: parked.id,
+      input: [
+        { type: "function_call_output", call_id: "call_missing", output: "3" },
+      ],
+    });
+    expect(res.status).toBe(400);
+  });
+});

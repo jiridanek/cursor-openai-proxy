@@ -1,8 +1,8 @@
 # Cursor OpenAI-compat proxy
 
-Local Node server that speaks Ollama-style OpenAI `/v1` (models, chat completions, completions) plus stateful Responses, backed by `@cursor/sdk` local agents.
+Local Node server that speaks Ollama-style OpenAI `/v1` (models, chat completions) plus stateful Responses, backed by `@cursor/sdk` local agents.
 
-Each request is a Cursor **agent run**, not a raw completions model. Default conversation mode is `ask` so clients do not edit the workspace. Behavioral contract: [SPEC.md](SPEC.md).
+Each request is a Cursor **agent run**, not a raw completions model. Default conversation mode is `ask` so clients do not edit the workspace. OpenAI function tools are passed through via `local.customTools` (the Cursor run stays alive until the client posts the tool result). Behavioral contract: [SPEC.md](SPEC.md).
 
 ## Setup
 
@@ -54,7 +54,21 @@ r2 = client.responses.create(
 
 Binds `127.0.0.1` by default.
 
-The SDK's `mode` field is `agent` or `plan`. `--agent-mode ask` omits that field and allowlists read-only tools (`read`, `grep`, `glob`, `ls`) so a completions client does not edit the workspace.
+### Tools and YOLO
+
+Local SDK agents already run offered tools without a human approval prompt. This proxy keeps that: it does **not** set `autoReview` and does **not** enable sandbox as a safety substitute.
+
+What the model can call is the SDK **allowlist** on `Agent.create`:
+
+- `--agent-mode ask` with no OpenAI `tools`: `read`, `grep`, `glob`, `ls` (no shell/edit)
+- A non-empty OpenAI `tools` array: `["mcp"]` plus in-process `local.customTools` from that request. Cursor built-ins (including shell) are not offered.
+- `--agent-mode plan` / `agent` with no OpenAI `tools`: the SDK default set (including shell)
+
+The proxy caller decides what may run. Do not “turn on safety” by adding `autoReview`; custom tools would stall or still run, and built-ins would still be in the toolset.
+
+Ambient Cursor MCP (`~/.cursor/mcp.json`, project `.cursor/mcp.json`, plugins) is never loaded: every agent uses `settingSources: []` and no `mcpServers`. Only tools supplied on the HTTP request are available.
+
+Chat tool loops need **sticky** sessions (`X-Cursor-Session-Id`). Prefix session mode rejects `tools`. Responses tool loops use `previous_response_id` plus `function_call_output` items; `store: false` cannot be combined with tools.
 
 ### CLI flags
 
@@ -73,24 +87,23 @@ The SDK's `mode` field is `agent` or `plan`. `--agent-mode ask` omits that field
 |---|---|
 | `GET /v1/models` | Cursor catalog ids **and** aliases |
 | `GET /v1/models/{id}` | Same lookup; 404 if unknown |
-| `POST /v1/chat/completions` | Ollama drop-in; `stream` true/false; sticky session via header / body |
-| `POST /v1/completions` | `prompt` → one user message |
-| `POST /v1/responses` | Stateful via `previous_response_id` |
+| `POST /v1/chat/completions` | Ollama drop-in; `stream` true/false; sticky session via header / body; function tools park as `tool_calls` |
+| `POST /v1/responses` | Stateful via `previous_response_id`; function tools park as `requires_action` |
 | `GET /v1/responses/{response_id}` | Stored response object |
-| `POST /v1/responses/{response_id}/cancel` | Cancel an in-flight run |
+| `POST /v1/responses/{response_id}/cancel` | Cancel an in-flight run (rejects parked tools) |
 | `GET /health` | Process liveness |
 
-Not implemented (501): embeddings, vision, OpenAI tools, `n != 1`, `logprobs`.
+Not implemented (501): embeddings, vision, `/v1/completions`, non-function tool types, `n != 1`, `logprobs`.
 
 ### Chat session modes
 
-`--session-mode sticky` (default): reuse `extra_body.session_id` / `cursor_session_id` or headers `X-Cursor-Session-Id` / `X-Session-Id`. If absent, create an agent and return the id in `X-Cursor-Session-Id`. Follow-ups `send()` only the latest user turn.
+`--session-mode sticky` (default): reuse `extra_body.session_id` / `cursor_session_id` or headers `X-Cursor-Session-Id` / `X-Session-Id`. If absent, create an agent and return the id in `X-Cursor-Session-Id`. Follow-ups `send()` only the latest user turn. Tool-result follow-ups must send that id and `role: "tool"` messages.
 
-`--session-mode prefix`: hash `messages[:-1]` + model + workspace. Same prefix reuses the agent; a history change starts a new one.
+`--session-mode prefix`: hash `messages[:-1]` + model + workspace. Same prefix reuses the agent; a history change starts a new one. Cannot be combined with OpenAI `tools`.
 
 ### Responses
 
-`previous_response_id` looks up the stored Cursor `Agent` and `send()`s only the new `input`. `store: false` is ephemeral (no chaining). Streaming uses Responses SSE event names (`response.created`, `response.output_text.delta`, `response.completed`).
+`previous_response_id` looks up the stored Cursor `Agent` and `send()`s only the new `input`. When the prior response is `requires_action`, submit `{ type: "function_call_output", call_id, output }` instead — that resumes the live run without `send()`. `store: false` is ephemeral (no chaining, no tools). Streaming uses Responses SSE event names (`response.created`, `response.output_text.delta`, `response.completed` or `response.requires_action`).
 
 ## Tests
 

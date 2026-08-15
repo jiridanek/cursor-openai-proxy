@@ -21,3 +21,27 @@ export function responseOutputTextDeltaEvent(opts: {
     },
   };
 }
+
+export function responseFunctionCallArgumentsDeltaEvent(opts: {
+  itemId: string;
+  delta: string;
+  outputIndex?: number;
+}): {
+  event: string;
+  data: {
+    type: "response.function_call_arguments.delta";
+    item_id: string;
+    output_index: number;
+    delta: string;
+  };
+} {
+  return {
+    event: "response.function_call_arguments.delta",
+    data: {
+      type: "response.function_call_arguments.delta",
+      item_id: opts.itemId,
+      output_index: opts.outputIndex ?? 0,
+      delta: opts.delta,
+    },
+  };
+}

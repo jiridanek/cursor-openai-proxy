@@ -1,25 +1,68 @@
-import { Agent, Cursor } from "@cursor/sdk";
+import { Agent, Cursor, type SDKCustomTool } from "@cursor/sdk";
 import type {
   AgentHandle,
   CreateAgentOptions,
+  CustomToolsMap,
   CursorBackend,
   ModelListItem,
   RunHandle,
   RunOutcome,
+  StreamEvent,
 } from "./backend.ts";
 
-type SdkRun = Awaited<ReturnType<Awaited<ReturnType<typeof Agent.create>>["send"]>>;
+type SdkRun = Awaited<
+  ReturnType<Awaited<ReturnType<typeof Agent.create>>["send"]>
+>;
 type SdkAgent = Awaited<ReturnType<typeof Agent.create>>;
+
+function stringifyArgs(args: unknown): string {
+  if (typeof args === "string") return args;
+  try {
+    return JSON.stringify(args ?? {});
+  } catch {
+    return "{}";
+  }
+}
+
+function toSdkCustomTools(
+  tools: CustomToolsMap | undefined,
+): Record<string, SDKCustomTool> | undefined {
+  if (!tools) return undefined;
+  const mapped: Record<string, SDKCustomTool> = {};
+  for (const [name, tool] of Object.entries(tools)) {
+    mapped[name] = {
+      description: tool.description,
+      inputSchema: tool.inputSchema as SDKCustomTool["inputSchema"],
+      execute: (args, context) =>
+        Promise.resolve(
+          tool.execute(args as Record<string, unknown>, context),
+        ).then((result) => result as string),
+    };
+  }
+  return mapped;
+}
 
 function wrapRun(run: SdkRun): RunHandle {
   return {
     id: run.id,
-    async *streamText() {
+    async *stream(): AsyncIterable<StreamEvent> {
       if (!run.supports("stream")) return;
       for await (const event of run.stream()) {
-        if (event.type !== "assistant") continue;
-        for (const block of event.message.content) {
-          if (block.type === "text" && block.text) yield block.text;
+        if (event.type === "assistant") {
+          for (const block of event.message.content) {
+            if (block.type === "text" && block.text) {
+              yield { type: "text", text: block.text };
+            }
+          }
+          continue;
+        }
+        if (event.type === "tool_call") {
+          yield {
+            type: "tool_call",
+            callId: event.call_id,
+            name: event.name,
+            arguments: stringifyArgs(event.args),
+          };
         }
       }
     },
@@ -50,8 +93,12 @@ function wrapRun(run: SdkRun): RunHandle {
 function wrapAgent(agent: SdkAgent): AgentHandle {
   return {
     agentId: agent.agentId,
-    async send(prompt: string) {
-      const run = await agent.send(prompt);
+    async send(prompt, options) {
+      const customTools = toSdkCustomTools(options?.customTools);
+      const run = await agent.send(
+        prompt,
+        customTools ? { local: { customTools } } : undefined,
+      );
       return wrapRun(run);
     },
     async close() {
@@ -71,7 +118,8 @@ export class SdkCursorBackend implements CursorBackend {
     if (cached && cached.expires > Date.now()) return cached.models;
     const pending = this.#inflight.get(apiKey);
     if (pending) return pending;
-    const load = Cursor.models.list({ apiKey })
+    const load = Cursor.models
+      .list({ apiKey })
       .then((models) => {
         const mapped: ModelListItem[] = models.map((model) => ({
           id: model.id,
@@ -102,8 +150,8 @@ export class SdkCursorBackend implements CursorBackend {
         params: options.params,
       },
       mode: options.mode === "ask" ? undefined : options.mode,
-      tools: options.mode === "ask" ? ["read", "grep", "glob", "ls"] : undefined,
-      local: { cwd: options.workspace },
+      tools: options.tools,
+      local: { cwd: options.workspace, settingSources: [] },
     });
     return wrapAgent(agent);
   }

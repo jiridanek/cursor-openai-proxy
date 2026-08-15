@@ -1,19 +1,34 @@
 import type {
   AgentHandle,
   CreateAgentOptions,
+  CustomToolsMap,
   CursorBackend,
   ModelListItem,
   RunHandle,
   RunOutcome,
+  SendOptions,
+  StreamEvent,
 } from "../../src/cursor/backend.ts";
 
-export type SendCall = { agentId: string; prompt: string };
+export type SendCall = {
+  agentId: string;
+  prompt: string;
+  customTools?: string[];
+};
+
+export type FakeToolCall = {
+  name: string;
+  arguments: Record<string, unknown>;
+  id?: string;
+  finalReply?: string | ((toolOutput: string) => string);
+};
 
 export type FakeOptions = {
   reply?: string | ((prompt: string) => string);
   deltas?: string[];
   hangUntilCancel?: boolean;
   runError?: { message: string };
+  toolCall?: FakeToolCall;
 };
 
 export class FakeCursorBackend implements CursorBackend {
@@ -50,9 +65,15 @@ export class FakeCursorBackend implements CursorBackend {
     const backend = this;
     return {
       agentId,
-      async send(prompt: string): Promise<RunHandle> {
-        backend.sends.push({ agentId, prompt });
-        return new FakeRun(prompt, backend.options);
+      async send(prompt: string, sendOptions?: SendOptions): Promise<RunHandle> {
+        backend.sends.push({
+          agentId,
+          prompt,
+          customTools: sendOptions?.customTools
+            ? Object.keys(sendOptions.customTools)
+            : undefined,
+        });
+        return new FakeRun(prompt, backend.options, sendOptions?.customTools);
       },
       async close() {
         backend.closed.push(agentId);
@@ -65,54 +86,131 @@ class FakeRun implements RunHandle {
   readonly id: string;
   readonly prompt: string;
   readonly options: FakeOptions;
+  readonly customTools?: CustomToolsMap;
   #cancelled = false;
-  #waiters: Array<(outcome: RunOutcome) => void> = [];
+  #done = false;
+  #queue: StreamEvent[] = [];
+  #notify: Array<() => void> = [];
+  #loop?: Promise<void>;
+  #outcome: RunOutcome = { status: "finished", result: "" };
+  #cancelWaiters: Array<(outcome: RunOutcome) => void> = [];
 
-  constructor(prompt: string, options: FakeOptions) {
+  constructor(
+    prompt: string,
+    options: FakeOptions,
+    customTools?: CustomToolsMap,
+  ) {
     this.prompt = prompt;
     this.options = options;
+    this.customTools = customTools;
     this.id = `run-${Math.random().toString(16).slice(2)}`;
   }
 
-  async *streamText(): AsyncIterable<string> {
-    if (this.options.hangUntilCancel) {
-      await this.#untilCancelled();
-      return;
-    }
-    if (this.options.runError) return;
-    const deltas = this.options.deltas ?? [this.#reply()];
-    for (const delta of deltas) {
-      if (this.#cancelled) return;
-      yield delta;
+  async *stream(): AsyncIterable<StreamEvent> {
+    this.#start();
+    let index = 0;
+    while (true) {
+      while (index < this.#queue.length) {
+        yield this.#queue[index++]!;
+      }
+      if (this.#done) return;
+      await new Promise<void>((resolve) => {
+        this.#notify.push(resolve);
+      });
     }
   }
 
   async wait(): Promise<RunOutcome> {
-    if (this.options.hangUntilCancel) {
-      if (!this.#cancelled) await this.#untilCancelled();
-      return { status: "cancelled", result: "" };
+    this.#start();
+    while (!this.#done) {
+      await new Promise<void>((resolve) => {
+        this.#notify.push(resolve);
+      });
     }
-    if (this.#cancelled) return { status: "cancelled", result: "" };
-    if (this.options.runError) {
-      return { status: "error", error: this.options.runError };
-    }
-    return {
-      status: "finished",
-      result: this.#reply(),
-      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
-    };
+    return this.#outcome;
   }
 
   async cancel(): Promise<void> {
     this.#cancelled = true;
-    for (const waiter of this.#waiters) {
+    for (const waiter of this.#cancelWaiters) {
       waiter({ status: "cancelled", result: "" });
     }
-    this.#waiters = [];
+    this.#cancelWaiters = [];
+    this.#finish({ status: "cancelled", result: "" });
   }
 
   supports(operation: "cancel" | "stream" | "wait"): boolean {
     return operation === "cancel" || operation === "stream" || operation === "wait";
+  }
+
+  #start(): void {
+    if (this.#loop) return;
+    this.#loop = this.#run();
+  }
+
+  async #run(): Promise<void> {
+    if (this.options.hangUntilCancel) {
+      if (!this.#cancelled) await this.#untilCancelled();
+      this.#finish({ status: "cancelled", result: "" });
+      return;
+    }
+    if (this.options.runError) {
+      this.#finish({ status: "error", error: this.options.runError });
+      return;
+    }
+    const deltas = this.options.deltas ?? (this.options.toolCall ? [] : [this.#reply()]);
+    for (const delta of deltas) {
+      if (this.#cancelled) {
+        this.#finish({ status: "cancelled", result: "" });
+        return;
+      }
+      this.#push({ type: "text", text: delta });
+    }
+    const toolCall = this.options.toolCall;
+    if (toolCall && this.customTools) {
+      const callId = toolCall.id ?? "call_test";
+      const argsJson = JSON.stringify(toolCall.arguments);
+      this.#push({
+        type: "tool_call",
+        callId,
+        name: toolCall.name,
+        arguments: argsJson,
+      });
+      const tool = this.customTools[toolCall.name];
+      let output = "";
+      if (tool) {
+        try {
+          const result = await tool.execute(toolCall.arguments, {
+            toolCallId: callId,
+          });
+          output =
+            typeof result === "string" ? result : JSON.stringify(result ?? "");
+        } catch {
+          this.#finish({ status: "cancelled", result: "" });
+          return;
+        }
+      }
+      if (this.#cancelled) {
+        this.#finish({ status: "cancelled", result: "" });
+        return;
+      }
+      const final =
+        typeof toolCall.finalReply === "function"
+          ? toolCall.finalReply(output)
+          : (toolCall.finalReply ?? `tool:${output}`);
+      this.#push({ type: "text", text: final });
+      this.#finish({
+        status: "finished",
+        result: final,
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      });
+      return;
+    }
+    this.#finish({
+      status: "finished",
+      result: this.#reply(),
+      usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+    });
   }
 
   #reply(): string {
@@ -123,7 +221,25 @@ class FakeRun implements RunHandle {
 
   #untilCancelled(): Promise<void> {
     return new Promise((resolve) => {
-      this.#waiters.push(() => resolve());
+      this.#cancelWaiters.push(() => resolve());
     });
+  }
+
+  #push(event: StreamEvent): void {
+    this.#queue.push(event);
+    this.#flush();
+  }
+
+  #finish(outcome: RunOutcome): void {
+    if (this.#done) return;
+    this.#outcome = outcome;
+    this.#done = true;
+    this.#flush();
+  }
+
+  #flush(): void {
+    const waiters = this.#notify;
+    this.#notify = [];
+    for (const waiter of waiters) waiter();
   }
 }

@@ -28,6 +28,12 @@ describe("POST /v1/chat/completions", () => {
     expect(body.choices[0]?.finish_reason).toBe("stop");
     expect(backend.creates).toBe(1);
     expect(backend.sends[0]?.prompt).toContain("What is 3+4?");
+    expect(backend.createOptions[0]?.tools).toEqual([
+      "read",
+      "grep",
+      "glob",
+      "ls",
+    ]);
     expect(res.headers.get("X-Cursor-Session-Id")).toMatch(/^sess_/);
   });
 
@@ -200,29 +206,12 @@ describe("POST /v1/chat/completions", () => {
     expect(res.status).toBe(400);
   });
 
-  it("wraps /v1/completions prompt as a user message", async () => {
-    const backend = new FakeCursorBackend({ reply: "ok" });
-    const { app } = makeApp(backend);
+  it("returns 501 for /v1/completions", async () => {
+    const { app } = makeApp();
     const res = await postJson(app, "/v1/completions", { prompt: "ping" });
-    expect(res.status).toBe(200);
-    const body = await jsonOf<{
-      object: string;
-      choices: Array<{ text: string }>;
-    }>(res);
-    expect(body.object).toBe("text_completion");
-    expect(body.choices[0]?.text).toBe("ok");
-    expect(backend.sends[0]?.prompt).toBe("ping");
-  });
-
-  it("returns 500 when a completions run fails", async () => {
-    const backend = new FakeCursorBackend({
-      runError: { message: "Model Blocked" },
-    });
-    const { app } = makeApp(backend);
-    const res = await postJson(app, "/v1/completions", { prompt: "What is 3+4?" });
-    expect(res.status).toBe(500);
-    expect(await jsonOf<{ error: { code: string; message: string } }>(res)).toMatchObject({
-      error: { code: "run_failed", message: "Model Blocked" },
+    expect(res.status).toBe(501);
+    expect(await jsonOf<{ error: { code: string } }>(res)).toMatchObject({
+      error: { code: "unsupported" },
     });
   });
 });

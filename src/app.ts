@@ -3,21 +3,19 @@ import { streamSSE } from "hono/streaming";
 import type { ProxyConfig } from "./config.ts";
 import {
   chatDeltaChunk,
+  chatFinishChunk,
   chatRoleChunk,
-  chatStopChunk,
-  completionsDeltaChunk,
-  completionsStopChunk,
+  chatToolCallChunk,
 } from "./codec/chatSse.ts";
-import { responseOutputTextDeltaEvent } from "./codec/responsesSse.ts";
+import {
+  responseFunctionCallArgumentsDeltaEvent,
+  responseOutputTextDeltaEvent,
+} from "./codec/responsesSse.ts";
 import { writeDone, writeJsonSse } from "./codec/sse.ts";
-import type { CursorBackend } from "./cursor/backend.ts";
+import type { CursorBackend, StreamEvent } from "./cursor/backend.ts";
 import { authenticate } from "./http/auth.ts";
 import { HttpError, notImplemented, openaiErrorBody } from "./http/errors.ts";
-import {
-  ChatCompletionRequest,
-  CompletionsRequest,
-  ResponsesRequest,
-} from "./http/schemas.ts";
+import { ChatCompletionRequest, ResponsesRequest } from "./http/schemas.ts";
 import { decodeJson } from "./http/validate.ts";
 import { newId, nowSeconds } from "./ids.ts";
 import {
@@ -25,22 +23,25 @@ import {
   flattenCatalog,
   flattenResponsesInput,
   logIgnoredSampling,
-  rejectToolsAndLogprobs,
+  parseFunctionTools,
+  rejectLogprobs,
   requireSingleChoice,
   toChatCompletion,
   toResponseObject,
-  toTextCompletion,
+  type FunctionToolDef,
 } from "./mapping.ts";
 import {
   aliasPrefixSession,
-  createChatSession,
+  cancelRun,
   lookupOwnedOr404,
   resolveChatSession,
   resolveResponseSession,
+  resumeParked,
   runSession,
   SessionRegistry,
   type SessionRecord,
 } from "./session/orchestrate.ts";
+import type { RunListener, TurnResult } from "./session/supervisor.ts";
 
 type Variables = {
   callerKeyHash: string;
@@ -55,14 +56,13 @@ function prepareGeneration(
   body: {
     model?: string;
     n?: number;
-    tools?: unknown;
     logprobs?: unknown;
   },
   options: { n?: boolean } = {},
 ): string {
   logIgnoredSampling(body);
   if (options.n) requireSingleChoice(body.n);
-  rejectToolsAndLogprobs(body);
+  rejectLogprobs(body);
   return modelId(body.model);
 }
 
@@ -70,15 +70,17 @@ function responseFromRecord(
   record: SessionRecord,
   extra?: { id?: string; text?: string; status?: string; createdAt?: number },
 ) {
+  const status = extra?.status ?? record.status;
   return toResponseObject({
     id: extra?.id ?? record.id,
     model: record.model,
     text: extra?.text ?? record.outputText,
-    status: extra?.status ?? record.status,
+    status,
     previousResponseId: record.previousResponseId,
     createdAt: extra?.createdAt ?? record.createdAt,
     usage: record.usage,
     error: extra?.status === "in_progress" ? undefined : record.error,
+    toolCalls: status === "requires_action" ? record.pendingToolCalls : undefined,
   });
 }
 
@@ -88,6 +90,63 @@ function chatRunError(record: SessionRecord): HttpError | undefined {
     type: "internal_error",
     code: "run_failed",
   });
+}
+
+async function executeTurn(
+  record: SessionRecord,
+  prompt: string,
+  resume: { outputs: { callId: string; output: string }[] } | undefined,
+  tools: FunctionToolDef[] | undefined,
+  onEvent?: RunListener,
+): Promise<TurnResult> {
+  if (resume) return resumeParked(record, resume.outputs, onEvent);
+  return runSession(record, prompt, { tools, onEvent });
+}
+
+function toolCallStreamer(): {
+  onEvent: (event: StreamEvent) => {
+    kind: "text" | "tool_call";
+    text?: string;
+    callId?: string;
+    itemId?: string;
+    name?: string;
+    argumentsDelta?: string;
+    index?: number;
+  } | undefined;
+} {
+  const seen = new Map<string, { index: number; args: string; itemId: string }>();
+  return {
+    onEvent(event) {
+      if (event.type === "text") return { kind: "text", text: event.text };
+      let state = seen.get(event.callId);
+      const isNew = !state;
+      if (!state) {
+        state = {
+          index: seen.size,
+          args: "",
+          itemId: event.callId,
+        };
+        seen.set(event.callId, state);
+      }
+      const prev = state.args;
+      const next = event.arguments;
+      let argumentsDelta: string | undefined;
+      if (next.startsWith(prev) && next.length > prev.length) {
+        argumentsDelta = next.slice(prev.length);
+      } else if (next !== prev) {
+        argumentsDelta = next;
+      }
+      state.args = next;
+      return {
+        kind: "tool_call",
+        callId: event.callId,
+        itemId: state.itemId,
+        name: isNew ? event.name : undefined,
+        argumentsDelta,
+        index: state.index,
+      };
+    },
+  };
 }
 
 export function createApp(config: ProxyConfig, backend: CursorBackend) {
@@ -147,13 +206,18 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
     throw notImplemented("Embeddings");
   });
 
+  app.post("/v1/completions", () => {
+    throw notImplemented("Completions");
+  });
+
   app.post("/v1/chat/completions", async (c) => {
     const body = await decodeJson(c, ChatCompletionRequest);
     const model = prepareGeneration(body, { n: true });
+    const tools = parseFunctionTools(body.tools);
     const callerKeyHash = c.get("callerKeyHash");
     const created = nowSeconds();
     const completionId = newId("chatcmpl_");
-    const { record, prompt } = await resolveChatSession({
+    const { record, prompt, resume } = await resolveChatSession({
       config,
       backend,
       registry,
@@ -161,6 +225,7 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
       apiKey: c.get("cursorApiKey"),
       model,
       body,
+      tools,
       headers: {
         cursorSessionId: c.req.header("x-cursor-session-id"),
         sessionId: c.req.header("x-session-id"),
@@ -171,15 +236,57 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
     if (body.stream) {
       return streamSSE(c, async (stream) => {
         await writeJsonSse(stream, chatRoleChunk(completionId, created, model));
-        const text = await runSession(record, prompt, async (delta) => {
-          await writeJsonSse(
-            stream,
-            chatDeltaChunk(completionId, created, model, delta),
-          );
-        });
+        const tracker = toolCallStreamer();
+        const result = await executeTurn(
+          record,
+          prompt,
+          resume,
+          tools,
+          async (event) => {
+            const mapped = tracker.onEvent(event);
+            if (!mapped) return;
+            if (mapped.kind === "text" && mapped.text) {
+              await writeJsonSse(
+                stream,
+                chatDeltaChunk(completionId, created, model, mapped.text),
+              );
+              return;
+            }
+            if (mapped.kind === "tool_call") {
+              if (mapped.name) {
+                await writeJsonSse(
+                  stream,
+                  chatToolCallChunk(completionId, created, model, {
+                    index: mapped.index ?? 0,
+                    id: mapped.callId,
+                    type: "function",
+                    function: { name: mapped.name, arguments: "" },
+                  }),
+                );
+              }
+              if (mapped.argumentsDelta) {
+                await writeJsonSse(
+                  stream,
+                  chatToolCallChunk(completionId, created, model, {
+                    index: mapped.index ?? 0,
+                    function: { arguments: mapped.argumentsDelta },
+                  }),
+                );
+              }
+            }
+          },
+        );
         const failed = chatRunError(record);
         if (failed) {
           await writeJsonSse(stream, openaiErrorBody(failed));
+          await writeDone(stream);
+          return;
+        }
+        if (result.status === "requires_action") {
+          await writeJsonSse(
+            stream,
+            chatFinishChunk(completionId, created, model, "tool_calls"),
+          );
           await writeDone(stream);
           return;
         }
@@ -190,84 +297,39 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
           body,
           model,
           record,
-          text,
+          result.text,
         );
-        await writeJsonSse(stream, chatStopChunk(completionId, created, model));
+        await writeJsonSse(
+          stream,
+          chatFinishChunk(completionId, created, model, "stop"),
+        );
         await writeDone(stream);
       });
     }
 
-    const text = await runSession(record, prompt);
+    const result = await executeTurn(record, prompt, resume, tools);
     const failed = chatRunError(record);
     if (failed) throw failed;
-    aliasPrefixSession(
-      config,
-      registry,
-      callerKeyHash,
-      body,
-      model,
-      record,
-      text,
-    );
+    if (result.status !== "requires_action") {
+      aliasPrefixSession(
+        config,
+        registry,
+        callerKeyHash,
+        body,
+        model,
+        record,
+        result.text,
+      );
+    }
     return c.json(
       toChatCompletion({
         id: completionId,
         model,
-        text,
+        text: result.text,
         created,
         usage: record.usage,
-      }),
-    );
-  });
-
-  app.post("/v1/completions", async (c) => {
-    const body = await decodeJson(c, CompletionsRequest);
-    const model = prepareGeneration(body, { n: true });
-    const prompt =
-      typeof body.prompt === "string" ? body.prompt : body.prompt.join("");
-    const created = nowSeconds();
-    const completionId = newId("cmpl_");
-    const record = await createChatSession({
-      backend,
-      registry,
-      config,
-      callerKeyHash: c.get("callerKeyHash"),
-      apiKey: c.get("cursorApiKey"),
-      model,
-    });
-
-    if (body.stream) {
-      return streamSSE(c, async (stream) => {
-        await runSession(record, prompt, async (delta) => {
-          await writeJsonSse(
-            stream,
-            completionsDeltaChunk(completionId, created, model, delta),
-          );
-        });
-        const failed = chatRunError(record);
-        if (failed) {
-          await writeJsonSse(stream, openaiErrorBody(failed));
-          await writeDone(stream);
-          return;
-        }
-        await writeJsonSse(
-          stream,
-          completionsStopChunk(completionId, created, model),
-        );
-        await writeDone(stream);
-      });
-    }
-
-    const text = await runSession(record, prompt);
-    const failed = chatRunError(record);
-    if (failed) throw failed;
-    return c.json(
-      toTextCompletion({
-        id: completionId,
-        model,
-        text,
-        created,
-        usage: record.usage,
+        toolCalls:
+          result.status === "requires_action" ? result.toolCalls : undefined,
       }),
     );
   });
@@ -275,12 +337,19 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
   app.post("/v1/responses", async (c) => {
     const body = await decodeJson(c, ResponsesRequest);
     const model = prepareGeneration(body);
+    const tools = parseFunctionTools(body.tools);
     const callerKeyHash = c.get("callerKeyHash");
     const store = body.store !== false;
+    if (!store && tools && tools.length > 0) {
+      throw new HttpError(
+        400,
+        "store:false cannot be combined with tools (tool outputs cannot be submitted)",
+      );
+    }
     const createdAt = nowSeconds();
     const responseId = newId("resp_");
     const inputText = flattenResponsesInput(body.input);
-    const { record, prompt } = await resolveResponseSession({
+    const { record, prompt, resume } = await resolveResponseSession({
       config,
       backend,
       registry,
@@ -291,6 +360,7 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
       responseId,
       inputText,
       store,
+      tools,
       createdAt,
     });
 
@@ -306,21 +376,59 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
           }),
           "response.created",
         );
-        const text = await runSession(record, prompt, async (delta) => {
-          const event = responseOutputTextDeltaEvent({ responseId, delta });
-          await writeJsonSse(stream, event.data, event.event);
-        });
+        const tracker = toolCallStreamer();
+        const result = await executeTurn(
+          record,
+          prompt,
+          resume,
+          tools,
+          async (event) => {
+            const mapped = tracker.onEvent(event);
+            if (!mapped) return;
+            if (mapped.kind === "text" && mapped.text) {
+              const delta = responseOutputTextDeltaEvent({
+                responseId,
+                delta: mapped.text,
+              });
+              await writeJsonSse(stream, delta.data, delta.event);
+              return;
+            }
+            if (mapped.kind === "tool_call" && mapped.argumentsDelta) {
+              const itemId =
+                record.supervisor?.itemIds.get(mapped.callId ?? "") ??
+                mapped.callId ??
+                responseId;
+              const delta = responseFunctionCallArgumentsDeltaEvent({
+                itemId,
+                delta: mapped.argumentsDelta,
+              });
+              await writeJsonSse(stream, delta.data, delta.event);
+            }
+          },
+        );
+        const terminal =
+          result.status === "requires_action"
+            ? "response.requires_action"
+            : "response.completed";
         await writeJsonSse(
           stream,
-          responseFromRecord(record, { id: responseId, text, createdAt }),
-          "response.completed",
+          responseFromRecord(record, {
+            id: responseId,
+            text: result.text,
+            createdAt,
+          }),
+          terminal,
         );
       });
     }
 
-    const text = await runSession(record, prompt);
+    const result = await executeTurn(record, prompt, resume, tools);
     return c.json(
-      responseFromRecord(record, { id: responseId, text, createdAt }),
+      responseFromRecord(record, {
+        id: responseId,
+        text: result.text,
+        createdAt,
+      }),
     );
   });
 
@@ -339,19 +447,7 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
       c.get("callerKeyHash"),
       c.req.param("response_id"),
     );
-    if (!record.activeRun) {
-      throw new HttpError(409, "Response is not in progress", {
-        code: "already_terminal",
-      });
-    }
-    if (!record.activeRun.supports("cancel")) {
-      throw new HttpError(400, "Cancel is not supported for this run", {
-        code: "unsupported",
-      });
-    }
-    await record.activeRun.cancel();
-    record.activeRun = undefined;
-    record.status = "cancelled";
+    await cancelRun(record);
     return c.json(responseFromRecord(record));
   });
 

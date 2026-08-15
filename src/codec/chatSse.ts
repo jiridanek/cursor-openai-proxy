@@ -1,3 +1,10 @@
+export type ChatToolCallDelta = {
+  index: number;
+  id?: string;
+  type?: "function";
+  function?: { name?: string; arguments?: string };
+};
+
 export type ChatChunk = {
   id: string;
   object: "chat.completion.chunk";
@@ -5,7 +12,11 @@ export type ChatChunk = {
   model: string;
   choices: Array<{
     index: number;
-    delta: { role?: "assistant"; content?: string };
+    delta: {
+      role?: "assistant";
+      content?: string;
+      tool_calls?: ChatToolCallDelta[];
+    };
     finish_reason: string | null;
   }>;
 };
@@ -35,53 +46,42 @@ export function chatDeltaChunk(
   };
 }
 
-export function chatStopChunk(id: string, created: number, model: string): ChatChunk {
+export function chatToolCallChunk(
+  id: string,
+  created: number,
+  model: string,
+  toolCall: ChatToolCallDelta,
+): ChatChunk {
   return {
     id,
     object: "chat.completion.chunk",
     created,
     model,
-    choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+    choices: [
+      {
+        index: 0,
+        delta: { tool_calls: [toolCall] },
+        finish_reason: null,
+      },
+    ],
   };
 }
 
-export type CompletionsChunk = {
-  id: string;
-  object: "text_completion";
-  created: number;
-  model: string;
-  choices: Array<{
-    text: string;
-    index: number;
-    finish_reason: string | null;
-  }>;
-};
-
-export function completionsDeltaChunk(
+export function chatFinishChunk(
   id: string,
   created: number,
   model: string,
-  text: string,
-): CompletionsChunk {
+  finishReason: "stop" | "tool_calls",
+): ChatChunk {
   return {
     id,
-    object: "text_completion",
+    object: "chat.completion.chunk",
     created,
     model,
-    choices: [{ text, index: 0, finish_reason: null }],
+    choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
   };
 }
 
-export function completionsStopChunk(
-  id: string,
-  created: number,
-  model: string,
-): CompletionsChunk {
-  return {
-    id,
-    object: "text_completion",
-    created,
-    model,
-    choices: [{ text: "", index: 0, finish_reason: "stop" }],
-  };
+export function chatStopChunk(id: string, created: number, model: string): ChatChunk {
+  return chatFinishChunk(id, created, model, "stop");
 }

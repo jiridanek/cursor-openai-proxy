@@ -1,5 +1,5 @@
 import type { ProxyConfig } from "../config.ts";
-import type { CursorBackend, RunHandle, RunOutcome } from "../cursor/backend.ts";
+import type { CursorBackend } from "../cursor/backend.ts";
 import { HttpError } from "../http/errors.ts";
 import type {
   ChatCompletionRequest,
@@ -8,18 +8,35 @@ import type {
 import { newId, nowSeconds } from "../ids.ts";
 import {
   effortParams,
+  extractFunctionCallOutputs,
   flattenMessages,
   lastUserText,
   nextPrefixSessionId,
   prefixSessionId,
+  sdkToolAllowlist,
+  toolOutputsFromMessages,
+  type FunctionCallOutput,
+  type FunctionToolDef,
 } from "../mapping.ts";
 import {
   Mutex,
   SessionRegistry,
   type SessionRecord,
 } from "./registry.ts";
+import {
+  cancelRun,
+  resumeParked,
+  runSession,
+} from "./supervisor.ts";
 
 export { SessionRegistry, type SessionRecord };
+export { cancelRun, resumeParked, runSession };
+
+export type ResolvedTurn = {
+  record: SessionRecord;
+  prompt: string;
+  resume?: { outputs: FunctionCallOutput[] };
+};
 
 async function createAgentRecord(opts: {
   backend: CursorBackend;
@@ -31,6 +48,7 @@ async function createAgentRecord(opts: {
   stored: boolean;
   previousResponseId?: string | null;
   effort?: string;
+  passThroughTools?: boolean;
 }): Promise<SessionRecord> {
   const catalog = opts.effort
     ? await opts.backend.listModels(opts.apiKey)
@@ -41,6 +59,10 @@ async function createAgentRecord(opts: {
     workspace: opts.config.workspace,
     mode: opts.config.agentMode,
     params: effortParams(catalog, opts.model, opts.effort),
+    tools: sdkToolAllowlist(
+      opts.config.agentMode,
+      Boolean(opts.passThroughTools),
+    ),
   });
   return {
     id: opts.id,
@@ -65,6 +87,7 @@ export async function createChatSession(opts: {
   model: string;
   id?: string;
   effort?: string;
+  passThroughTools?: boolean;
 }): Promise<SessionRecord> {
   const record = await createAgentRecord({
     ...opts,
@@ -84,13 +107,23 @@ export async function resolveChatSession(opts: {
   model: string;
   body: ChatCompletionRequest;
   headers: { cursorSessionId?: string; sessionId?: string };
-}): Promise<{ record: SessionRecord; prompt: string }> {
+  tools?: readonly FunctionToolDef[];
+}): Promise<ResolvedTurn> {
   const stickyId =
     opts.body.cursor_session_id ??
     opts.body.session_id ??
     opts.headers.cursorSessionId ??
     opts.headers.sessionId;
   const effort = opts.body.reasoning_effort;
+  const toolOutputs = toolOutputsFromMessages(opts.body.messages);
+  const passThrough = Boolean(opts.tools && opts.tools.length > 0);
+
+  if (opts.config.sessionMode === "prefix" && passThrough) {
+    throw new HttpError(
+      400,
+      "OpenAI tools require sticky sessions; prefix mode is not supported",
+    );
+  }
 
   const lookupId =
     opts.config.sessionMode === "prefix"
@@ -103,9 +136,24 @@ export async function resolveChatSession(opts: {
         : undefined
       : stickyId;
 
+  if (toolOutputs.length > 0 && !lookupId) {
+    throw new HttpError(
+      400,
+      "Tool follow-ups require X-Cursor-Session-Id or session_id",
+    );
+  }
+
   if (lookupId) {
     const existing = opts.registry.get(opts.callerKeyHash, lookupId);
     if (existing) {
+      if (existing.status === "requires_action") {
+        if (toolOutputs.length === 0) {
+          throw new HttpError(409, "Session is waiting for tool outputs", {
+            code: "requires_action",
+          });
+        }
+        return { record: existing, prompt: "", resume: { outputs: toolOutputs } };
+      }
       return { record: existing, prompt: lastUserText(opts.body.messages) };
     }
   }
@@ -118,6 +166,7 @@ export async function resolveChatSession(opts: {
     apiKey: opts.apiKey,
     model: opts.model,
     effort,
+    passThroughTools: passThrough,
     id: opts.config.sessionMode === "sticky" ? stickyId : undefined,
   });
   return { record, prompt: flattenMessages(opts.body.messages) };
@@ -153,9 +202,12 @@ export async function resolveResponseSession(opts: {
   responseId: string;
   inputText: string;
   store: boolean;
+  tools?: readonly FunctionToolDef[];
   createdAt: number;
-}): Promise<{ record: SessionRecord; prompt: string }> {
+}): Promise<ResolvedTurn> {
   const effort = opts.body.reasoning_effort ?? opts.body.reasoning?.effort;
+  const outputs = extractFunctionCallOutputs(opts.body.input);
+  const passThrough = Boolean(opts.tools && opts.tools.length > 0);
 
   if (opts.body.previous_response_id) {
     const existing = opts.registry.get(
@@ -175,6 +227,31 @@ export async function resolveResponseSession(opts: {
         `Unknown previous_response_id: ${opts.body.previous_response_id}`,
       );
     }
+
+    if (existing.status === "requires_action") {
+      if (outputs.length === 0) {
+        throw new HttpError(409, "Response is waiting for tool outputs", {
+          code: "requires_action",
+        });
+      }
+      if (opts.inputText.trim()) {
+        throw new HttpError(409, "Response is waiting for tool outputs", {
+          code: "requires_action",
+        });
+      }
+      const followUp: SessionRecord = {
+        ...existing,
+        id: opts.responseId,
+        previousResponseId: opts.body.previous_response_id,
+        createdAt: opts.createdAt,
+        stored: opts.store,
+        usage: undefined,
+        error: undefined,
+      };
+      if (opts.store) opts.registry.set(followUp);
+      return { record: followUp, prompt: "", resume: { outputs } };
+    }
+
     const followUp: SessionRecord = {
       ...existing,
       id: opts.responseId,
@@ -186,6 +263,8 @@ export async function resolveResponseSession(opts: {
       createdAt: opts.createdAt,
       stored: opts.store,
       activeRun: undefined,
+      supervisor: undefined,
+      pendingToolCalls: undefined,
     };
     if (opts.store) opts.registry.set(followUp);
     return { record: followUp, prompt: opts.inputText };
@@ -201,6 +280,7 @@ export async function resolveResponseSession(opts: {
     stored: opts.store,
     previousResponseId: null,
     effort,
+    passThroughTools: passThrough,
   });
   record.createdAt = opts.createdAt;
   if (opts.store) opts.registry.set(record);
@@ -222,52 +302,4 @@ export function lookupOwnedOr404(
     throw new HttpError(404, `Unknown response: ${id}`, { code: "not_found" });
   }
   return record;
-}
-
-function applyOutcome(
-  record: SessionRecord,
-  outcome: RunOutcome,
-  text: string,
-): void {
-  record.outputText = outcome.result ?? text;
-  record.usage = outcome.usage;
-  if (outcome.status === "cancelled") {
-    record.status = "cancelled";
-    record.error = undefined;
-  } else if (outcome.status === "error") {
-    record.status = "failed";
-    record.error = outcome.error ?? { message: "Agent run failed" };
-  } else {
-    record.status = "completed";
-    record.error = undefined;
-  }
-}
-
-export async function runSession(
-  record: SessionRecord,
-  prompt: string,
-  onDelta?: (delta: string) => Promise<void>,
-): Promise<string> {
-  return record.mutex.runExclusive(async () => {
-    const run: RunHandle = await record.agent.send(prompt);
-    record.activeRun = run;
-    record.status = "in_progress";
-    record.outputText = "";
-    try {
-      if (onDelta) {
-        for await (const delta of run.streamText()) {
-          record.outputText += delta;
-          await onDelta(delta);
-        }
-      }
-      const outcome = await run.wait();
-      applyOutcome(record, outcome, record.outputText);
-      return record.outputText;
-    } finally {
-      record.activeRun = undefined;
-      if (!record.stored) {
-        await record.agent.close().catch(() => undefined);
-      }
-    }
-  });
 }

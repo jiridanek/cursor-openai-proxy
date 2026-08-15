@@ -1,10 +1,12 @@
 import type { AgentHandle, RunHandle, TokenUsage } from "../cursor/backend.ts";
+import type { PendingToolCall } from "../mapping.ts";
+import type { RunSupervisor } from "./supervisor.ts";
 
 export class Mutex {
   #locked = false;
   #queue: Array<() => void> = [];
 
-  async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+  async acquire(): Promise<void> {
     if (this.#locked) {
       await new Promise<void>((resolve) => {
         this.#queue.push(resolve);
@@ -12,18 +14,27 @@ export class Mutex {
     } else {
       this.#locked = true;
     }
+  }
+
+  release(): void {
+    const next = this.#queue.shift();
+    if (next) next();
+    else this.#locked = false;
+  }
+
+  async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
+    await this.acquire();
     try {
       return await fn();
     } finally {
-      const next = this.#queue.shift();
-      if (next) next();
-      else this.#locked = false;
+      this.release();
     }
   }
 }
 
 export type SessionStatus =
   | "in_progress"
+  | "requires_action"
   | "completed"
   | "cancelled"
   | "failed";
@@ -34,6 +45,8 @@ export type SessionRecord = {
   agent: AgentHandle;
   mutex: Mutex;
   activeRun?: RunHandle;
+  supervisor?: RunSupervisor;
+  pendingToolCalls?: PendingToolCall[];
   outputText: string;
   status: SessionStatus;
   model: string;

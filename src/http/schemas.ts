@@ -12,6 +12,8 @@ export const ChatMessage = Schema.Struct({
     Schema.Union(Schema.String, Schema.Array(TextPart), Schema.Null),
   ),
   name: Schema.optional(Schema.String),
+  tool_call_id: Schema.optional(Schema.String),
+  tool_calls: Schema.optional(Schema.Array(Schema.Unknown)),
 });
 export type ChatMessage = Schema.Schema.Type<typeof ChatMessage>;
 
@@ -27,6 +29,8 @@ export const ChatCompletionRequest = Schema.Struct({
   max_completion_tokens: Schema.optional(Schema.Number),
   logprobs: Schema.optional(Schema.Boolean),
   tools: Schema.optional(Schema.Array(Schema.Unknown)),
+  tool_choice: Schema.optional(Schema.Unknown),
+  parallel_tool_calls: Schema.optional(Schema.Boolean),
   reasoning_effort: Schema.optional(Schema.String),
   session_id: Schema.optional(Schema.String),
   cursor_session_id: Schema.optional(Schema.String),
@@ -34,20 +38,6 @@ export const ChatCompletionRequest = Schema.Struct({
 export type ChatCompletionRequest = Schema.Schema.Type<
   typeof ChatCompletionRequest
 >;
-
-export const CompletionsRequest = Schema.Struct({
-  model: Schema.optional(Schema.String),
-  prompt: Schema.Union(Schema.String, Schema.Array(Schema.String)),
-  stream: Schema.optional(Schema.Boolean),
-  n: Schema.optional(Schema.Number),
-  temperature: Schema.optional(Schema.Number),
-  top_p: Schema.optional(Schema.Number),
-  seed: Schema.optional(Schema.Number),
-  max_tokens: Schema.optional(Schema.Number),
-  logprobs: Schema.optional(Schema.Number),
-  tools: Schema.optional(Schema.Array(Schema.Unknown)),
-});
-export type CompletionsRequest = Schema.Schema.Type<typeof CompletionsRequest>;
 
 const Reasoning = Schema.Struct({
   effort: Schema.optional(Schema.String),
@@ -63,6 +53,8 @@ export const ResponsesRequest = Schema.Struct({
   temperature: Schema.optional(Schema.Number),
   top_p: Schema.optional(Schema.Number),
   tools: Schema.optional(Schema.Array(Schema.Unknown)),
+  tool_choice: Schema.optional(Schema.Unknown),
+  parallel_tool_calls: Schema.optional(Schema.Boolean),
   reasoning: Schema.optional(Reasoning),
   reasoning_effort: Schema.optional(Schema.String),
 });
@@ -78,7 +70,7 @@ export const ChatCompletion = Schema.Struct({
       index: Schema.Number,
       message: Schema.Struct({
         role: Schema.Literal("assistant"),
-        content: Schema.String,
+        content: Schema.Union(Schema.String, Schema.Null),
       }),
       finish_reason: Schema.String,
     }),

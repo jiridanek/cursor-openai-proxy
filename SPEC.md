@@ -14,9 +14,14 @@ This version does **not**:
 
 - Run cloud agents (`bc-` ids)
 - Expose Cursor as a public multi-tenant completions product
-- Implement OpenAI embeddings, vision, function-calling / tools, Assistants, Realtime, or the Conversations resource
+- Implement OpenAI embeddings, vision, Assistants, Realtime, the Conversations resource, or `/v1/completions`
+- Use Cursor hooks as the tool bridge (hooks cannot emit a Responses `function_call`; deny is not a tool result)
+- Use `local.autoReview` or sandbox as the way to strip `shell` / `edit` (the SDK **allowlist** does that)
+- Load the operator’s Cursor-app MCP config (`~/.cursor/mcp.json`, project `.cursor/mcp.json`, plugins, dashboard)
 - Honor sampling knobs (`temperature`, `top_p`, `seed`, `max_tokens`, `max_completion_tokens`) — they are accepted and ignored (logged when `DEBUG` is set)
 - Persist sessions across process restarts (in-memory only)
+
+OpenAI **function tools** are in scope (Chat Completions and Responses). See §5.
 
 ---
 
@@ -24,7 +29,7 @@ This version does **not**:
 
 - Runtime: Node.js 22.13+
 - One process, one Hono app, one in-memory `SessionRegistry`
-- Cursor SDK default import (`@cursor/sdk`), local runtime only: `local: { cwd: --workspace }`
+- Cursor SDK default import (`@cursor/sdk`), local runtime only
 - Chat Completions and Responses share the same registry and agents. They must not each own a separate agent pool.
 
 CLI:
@@ -42,13 +47,19 @@ CLI:
 
 ### Agent mode mapping
 
-The SDK `mode` field is only `"agent" | "plan"`.
+The SDK `mode` field is only `"agent" | "plan"`. Local runs stay **YOLO**: do **not** set `local.autoReview` and do **not** enable sandbox. Offered tools run without a human prompt. The proxy caller decides what may run by sending OpenAI `tools` and choosing `--agent-mode`.
 
-| `--agent-mode` | SDK `mode` | Tools |
+Always `local: { cwd: --workspace, settingSources: [] }`. Never pass `mcpServers`. Never `agent.reload()` to pick up on-disk MCP. User/project/plugin Cursor MCP must not appear.
+
+| Situation | SDK `mode` | `tools` on create |
 |---|---|---|
-| `ask` | omitted | allowlist `read`, `grep`, `glob`, `ls` (read-only; no workspace edits) |
-| `plan` | `"plan"` | SDK default toolset |
-| `agent` | `"agent"` | SDK default toolset |
+| `--agent-mode ask`, no OpenAI `tools` | omitted | `["read", "grep", "glob", "ls"]` (read-only built-ins; no shell/edit) |
+| Client sent a non-empty OpenAI `tools` array | as below | `["mcp"]` only (Cursor built-ins gone; only `local.customTools`) |
+| `--agent-mode plan` / `agent`, no OpenAI `tools` | `"plan"` / `"agent"` | omit (SDK default set, including shell) |
+
+`--agent-mode` still applies when OpenAI `tools` are present (`ask` omits SDK `mode`; `plan` / `agent` set it). Do **not** use `tools: []` for the client-tool bridge (that disables custom tools too). Do **not** `disallowedTools: ["mcp"]`. Empty OpenAI `tools: []` is text-only for that request (no customTools, no park); keep the ask/plan/agent mapping above.
+
+`tools: ["mcp"]` grants the MCP **capability** needed for `custom-user-tools`. Combined with `settingSources: []` and no `mcpServers`, the only MCP tools the model can see are `local.customTools` built from **this HTTP request’s** OpenAI `tools` array.
 
 ---
 
@@ -85,16 +96,18 @@ In-memory map. Lookup key is **`(callerKeyHash, id)`**, never `id` alone.
 
 - `callerKeyHash` = SHA-256 hex of the raw Bearer token. The token is not stored next to the agent.
 - `id` is a `response_id`, chat `session_id`, or prefix-derived `sess_…`.
-- Record fields: `{ agent, activeRun?, outputText, status, model, createdAt, previousResponseId, stored, usage? }`
-- Per-agent mutex: overlapping `send()`s on the same agent **queue** (serialize). Cancel does not take that lock.
+- Record fields: `{ agent, activeRun?, supervisor?, pendingToolCalls?, outputText, status, model, createdAt, previousResponseId, stored, usage?, error? }`
+- Per-agent mutex: overlapping `send()`s on the same agent **queue** (serialize). The mutex is **released while parked** (`requires_action`) so a tool-output POST can run (it does not `send()`). Cancel does not take that lock.
 - Unknown id, or id that exists only under a **different** caller hash:
   - `GET` / `POST …/cancel` → **404** (not 403)
   - `POST /v1/responses` with `previous_response_id` that exists under another caller → **404**
   - `POST /v1/responses` with a `previous_response_id` that exists under **no** caller → **400**
 
-Status values: `in_progress` | `completed` | `cancelled` | `failed`.
+Status values: `in_progress` | `requires_action` | `completed` | `cancelled` | `failed`.
 
-`store: false` (Responses): agent is not registered; after the run it is disposed; `previous_response_id` cannot chain to it.
+`store: false` (Responses): agent is not registered; after the run it is disposed; `previous_response_id` cannot chain to it. `store: false` combined with a non-empty OpenAI `tools` array → **400** (cannot submit tool outputs).
+
+While `requires_action`, `activeRun` stays set (the Cursor `Run` is alive). Parked `customTools.execute()` promises live on the supervisor until the client posts outputs, or cancel rejects them.
 
 ---
 
@@ -110,9 +123,24 @@ Unhandled exceptions → **500** `{ type: "internal_error", code: "internal" }`.
 
 Unimplemented features use **501** `{ code: "unsupported" }` unless noted.
 
-Default `model` when omitted or blank: `auto`. A model id that appears in `GET /v1/models` can still fail at run time (for example team admin blocks). Chat Completions and Completions then return **500** `{ error: { type: "internal_error", code: "run_failed", message } }` with the Cursor `wait()` error. Responses stay **200** with `status: "failed"` and `error: { message }`.
+Default `model` when omitted or blank: `auto`. A model id that appears in `GET /v1/models` can still fail at run time (for example team admin blocks). Chat Completions then return **500** `{ error: { type: "internal_error", code: "run_failed", message } }` with the Cursor `wait()` error. Responses stay **200** with `status: "failed"` and `error: { message }`.
 
 `reasoning_effort` (chat) and `reasoning_effort` / `reasoning.effort` (responses) are mapped onto `model.params` **only** when `Cursor.models.list()` reports a parameter id `effort` or `reasoning_effort` that includes the requested value. Otherwise they are ignored. Applied at **agent create**, not on follow-up `send()`.
+
+### Tool pass-through
+
+OpenAI `type: "function"` tools are registered as `local.customTools` on `agent.send()`. When the model calls one, `execute()` **parks** (promise keyed by SDK `toolCallId` = OpenAI `call_id`). The HTTP turn ends with Chat `finish_reason: "tool_calls"` or Responses `status: "requires_action"`. The Cursor `Run` stays alive. The next client POST supplies the tool result and **resolves** the parked promise; it is **not** `agent.send()`.
+
+Accepted schema: `type: "function"` only.
+
+- Chat: `{ type: "function", function: { name, description, parameters } }`
+- Responses: the Chat shape, or `{ type: "function", name, description, parameters }`
+
+Other tool types (`file_search`, `web_search`, `code_interpreter`, …) → **501**. `tool_choice` / `parallel_tool_calls` are accepted and ignored (DEBUG log). Empty `tools: []` means text-only for that request.
+
+SDK `toolCallId` is OpenAI `call_id`. Responses item ids may be `fc_…`.
+
+A new user turn while parked → **409** `{ code: "requires_action" }`.
 
 ### `GET /health`
 
@@ -140,11 +168,12 @@ Request (Effect Schema; extra fields ignored):
 
 | Field | Required | Notes |
 |---|---|---|
-| `messages` | yes | array of `{ role, content?, name? }` |
+| `messages` | yes | array of `{ role, content?, name?, tool_call_id?, tool_calls? }`; `role` may be `tool` |
 | `model` | no | default `auto` |
 | `stream` | no | SSE if true |
 | `n` | no | only `1` or omitted; else **400** |
-| `tools` | no | if present → **501** |
+| `tools` | no | function tools; other types → **501**; empty `[]` = text-only |
+| `tool_choice` / `parallel_tool_calls` | no | ignored |
 | `logprobs` | no | if truthy → **501** |
 | `session_id` / `cursor_session_id` | no | sticky session id (also `X-Cursor-Session-Id` / `X-Session-Id`) |
 | `reasoning_effort` | no | optional `model.params` mapping |
@@ -152,9 +181,11 @@ Request (Effect Schema; extra fields ignored):
 
 `content` may be a string, `null`, or an array of parts. Parts with `image_url` or `type` `image_url` / `input_image` → **501**. Text parts are concatenated.
 
+The tool loop **requires sticky sessions**. `--session-mode prefix` plus a non-empty `tools` array → **400**. Return `X-Cursor-Session-Id`. A follow-up that submits `role: "tool"` messages without that id → **400**.
+
 Response header: `X-Cursor-Session-Id` = the resolved session id.
 
-Non-stream **200**:
+Non-stream **200** (text):
 
 ```json
 {
@@ -171,18 +202,21 @@ Non-stream **200**:
 }
 ```
 
+Non-stream **200** (parked tools): `finish_reason: "tool_calls"`, `message.tool_calls: [{ id, type: "function", function: { name, arguments } }]`, `message.content: null`. `arguments` is a JSON string.
+
 `usage` is copied from the Cursor run when the runtime reports it; otherwise zeros.
 
 Stream: `text/event-stream`. Frames are `data: <json>\n\n` (no `event:` name), then `data: [DONE]\n\n`:
 
 1. role chunk: `delta: { role: "assistant" }`, `finish_reason: null`
-2. one or more content chunks: `delta: { content }`
-3. stop chunk: `delta: {}`, `finish_reason: "stop"`
-4. `[DONE]`
+2. zero or more content chunks: `delta: { content }`
+3. if parked: `delta.tool_calls` (id/name then argument string deltas), then `finish_reason: "tool_calls"` — do **not** emit `finish_reason: "stop"`
+4. else: stop chunk: `delta: {}`, `finish_reason: "stop"`
+5. `[DONE]`
 
 If `wait()` returns `error`, skip the stop chunk and emit `data: { error: { message, type: "internal_error", code: "run_failed" } }` then `[DONE]`. Non-stream failed runs are **500** instead.
 
-Only assistant **text** deltas are forwarded. Cursor tool-call internals are not emitted as content.
+Follow-up: last messages with `role: "tool"` + `tool_call_id` **resolve** the parked `execute()`; they are **not** `agent.send()`. Unknown `tool_call_id` → **400**. A new user turn while parked → **409** `{ code: "requires_action" }`.
 
 #### Chat session modes
 
@@ -190,7 +224,7 @@ Only assistant **text** deltas are forwarded. Cursor tool-call internals are not
 
 Resolve id in order: `cursor_session_id` → `session_id` → header `X-Cursor-Session-Id` → `X-Session-Id`.
 
-- Id present and known for this caller → reuse agent; `send()` **only the last user message text**.
+- Id present and known for this caller → reuse agent; `send()` **only the last user message text** (unless the follow-up is a parked-tool resume).
 - Id present but unknown → create agent with that id; `send()` flattened full `messages`.
 - Id absent → create agent (`sess_` + random); return that id in the header; `send()` flattened full `messages`.
 
@@ -199,31 +233,29 @@ Resolve id in order: `cursor_session_id` → `session_id` → header `X-Cursor-S
 - If `messages[:-1]` is non-empty, lookup `sess_` + first 24 hex chars of SHA-256(`JSON.stringify({ prefix: messages[:-1], model, workspace })`). Hit → reuse; `send()` last user text.
 - Miss or empty prefix → new agent; `send()` flattened full `messages`.
 - After the run, alias the same agent under the hash of `messages + assistant reply`, so the next client request’s `messages[:-1]` matches.
+- Non-empty `tools` → **400** (tool loop needs sticky ids).
 
 Flattened new-agent prompt is lines of `"{role}: {content}"`.
 
 ### `POST /v1/completions`
 
-Thin wrapper: `prompt` (string or string array joined) is sent as the user text to a **new** chat session (not sticky/prefix reuse). `n`, `tools`, `logprobs` rules match chat.
-
-Non-stream **200**: `{ id: "cmpl_…", object: "text_completion", choices: [{ text, index: 0, finish_reason: "stop" }], usage, model, created }`.
-
-Stream: `text_completion` chunks with `choices[0].text` deltas, then a stop chunk, then `[DONE]`.
+**501** Completions (`{ code: "unsupported" }`).
 
 ### `POST /v1/responses`
 
 | Field | Required | Notes |
 |---|---|---|
-| `input` | yes | string, or array of text items |
+| `input` | yes | string, or array of text items / `function_call_output` |
 | `model` | no | default `auto` |
 | `instructions` | no | prepended as `system: …\n` on **first** create only |
-| `previous_response_id` | no | follow-up: `send()` only new `input` |
-| `store` | no | default `true`; `false` = ephemeral |
+| `previous_response_id` | no | follow-up: `send()` only new `input`, or resume parked tools |
+| `store` | no | default `true`; `false` = ephemeral; `false` + tools → **400** |
 | `stream` | no | Responses SSE if true |
-| `tools` | no | if present → **501** |
+| `tools` | no | function tools; other types → **501**; empty `[]` = text-only |
+| `tool_choice` / `parallel_tool_calls` | no | ignored |
 | `reasoning` / `reasoning_effort` | no | optional effort mapping |
 
-`input` array items: strings; `{ type: "input_text", text }`; `{ type: "message", … }` / objects with `role` (content flattened like chat); objects with `text`. `input_image` / `image_url` / other types → **501**.
+`input` array items: strings; `{ type: "input_text", text }`; `{ type: "message", … }` / objects with `role` (content flattened like chat); objects with `text`; `{ type: "function_call_output", call_id, output }`. `input_image` / `image_url` / other types → **501**.
 
 Unknown `previous_response_id`: **400** if the id is unknown globally; **404** if it exists only under another caller.
 
@@ -248,25 +280,30 @@ Non-stream **200** (enough for `client.responses.create()` / `.output_text`):
 }
 ```
 
-`status` may be `completed`, `cancelled`, or `failed` after the run. Failed runs include `error: { message }` from Cursor `wait()`.
+`status` may be `completed`, `requires_action`, `cancelled`, or `failed` after the turn. Failed runs include `error: { message }` from Cursor `wait()`. Include `error` only on failed runs.
+
+When parked: `status: "requires_action"`, `output` includes `{ type: "function_call", id, call_id, name, arguments, status: "completed" }` (and any `output_text` already produced).
+
+Next POST: `previous_response_id` + `input` items `{ type: "function_call_output", call_id, output }`. New `resp_` id, **same** Cursor agent and **same** live `Run`. Do not `send()` a user message. Unknown `call_id` → **400**.
 
 Stream (`event:` + `data:`):
 
 1. `response.created` — skeleton object, `status: "in_progress"`, empty text
 2. `response.output_text.delta` — `{ type, item_id, output_index: 0, delta }` for each assistant text delta
-3. `response.completed` — full object with final text and status
+3. function-call argument deltas (from SDK `tool_call` / `onDelta` tool updates)
+4. terminal: `response.completed` with the full object, **or** `response.requires_action` with the full parked object — **not** `response.completed` until `wait()` finishes
 
-Do not leak Cursor tool-call payloads as `output_text`.
+`onDelta` / `run.stream()` are observe-only; they do not replace `execute()`.
 
 ### `GET /v1/responses/{response_id}`
 
-Auth + ownership. **200** stored object (status, output text, usage). Unknown / wrong caller → **404**.
+Auth + ownership. **200** stored object (status, output text, pending function calls, usage). Unknown / wrong caller → **404**. While parked, `status` is `requires_action`.
 
 ### `POST /v1/responses/{response_id}/cancel`
 
 - No in-flight run → **409** `{ code: "already_terminal" }`
 - Run does not `supports("cancel")` → **400** `{ code: "unsupported" }`
-- Else `run.cancel()`, clear `activeRun`, set `status: "cancelled"`, return the response object (**200**)
+- Else reject every parked `execute()` promise, `run.cancel()`, clear `activeRun`, set `status: "cancelled"`, return the response object (**200**)
 
 ---
 
@@ -275,10 +312,12 @@ Auth + ownership. **200** stored object (status, output text, usage). Unknown / 
 | Prefix | Used for |
 |---|---|
 | `chatcmpl_` | Chat completion id (UUID, no hyphens) |
-| `cmpl_` | Legacy completions id |
 | `resp_` | Responses id (also the registry key when `store: true`) |
 | `msg_` | Output message id inside a response object |
+| `fc_` | Responses `function_call` item id |
 | `sess_` | Chat session id (random, client-supplied sticky id, or prefix hash) |
+
+SDK `toolCallId` is reused as OpenAI `call_id` / Chat `tool_calls[].id`.
 
 ---
 
@@ -290,7 +329,7 @@ client = OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="ollama")  # hoste
 # client = OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="crsr_...")  # passthrough
 ```
 
-- Chat Completions: set `extra_body={"session_id": …}` or read `X-Cursor-Session-Id` from the first response to continue a sticky session.
-- Responses: pass `previous_response_id` from the prior `id`. That is the native session handle.
+- Chat Completions: set `extra_body={"session_id": …}` or read `X-Cursor-Session-Id` from the first response to continue a sticky session. Tool follow-ups **must** send that id.
+- Responses: pass `previous_response_id` from the prior `id`. That is the native session handle. Submit tool results as `function_call_output` items on the next create.
 
-Each turn is an agent run against `--workspace`. It can read the tree (and, unless `ask`, edit it). It is not a token-for-token chat model.
+Each turn is an agent run against `--workspace`. It can read the tree (and, unless `ask` or a client-tools allowlist of `["mcp"]`, edit it). It is not a token-for-token chat model.

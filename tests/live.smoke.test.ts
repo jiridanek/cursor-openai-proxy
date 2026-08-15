@@ -52,4 +52,66 @@ describe.skipIf(!live)("live smoke", () => {
     }>(second);
     expect(follow.output[0]?.content[0]?.text.length).toBeGreaterThan(0);
   });
+
+  it("satisfies one function tool over chat completions", async () => {
+    const first = await postJson(app, "/v1/chat/completions", {
+      model: process.env.LIVE_SMOKE_MODEL ?? "auto",
+      messages: [
+        {
+          role: "user",
+          content:
+            "Call the add tool with a=3 and b=4. Do not compute the sum yourself.",
+        },
+      ],
+      tools: [
+        {
+          type: "function",
+          function: {
+            name: "add",
+            description: "Add two numbers",
+            parameters: {
+              type: "object",
+              properties: {
+                a: { type: "number" },
+                b: { type: "number" },
+              },
+              required: ["a", "b"],
+            },
+          },
+        },
+      ],
+    });
+    expect(first.status).toBe(200);
+    const parked = await jsonOf<{
+      choices: Array<{
+        finish_reason: string;
+        message: {
+          content: string | null;
+          tool_calls?: Array<{ id: string }>;
+        };
+      }>;
+    }>(first);
+    if (parked.choices[0]?.finish_reason !== "tool_calls") return;
+    const sessionId = first.headers.get("X-Cursor-Session-Id");
+    const callId = parked.choices[0]?.message.tool_calls?.[0]?.id;
+    expect(sessionId).toBeTruthy();
+    expect(callId).toBeTruthy();
+    const second = await postJson(app, "/v1/chat/completions", {
+      session_id: sessionId,
+      messages: [
+        {
+          role: "user",
+          content:
+            "Call the add tool with a=3 and b=4. Do not compute the sum yourself.",
+        },
+        parked.choices[0]!.message,
+        { role: "tool", tool_call_id: callId, content: "7" },
+      ],
+    });
+    expect(second.status).toBe(200);
+    const done = await jsonOf<{
+      choices: Array<{ message: { content: string | null } }>;
+    }>(second);
+    expect(done.choices[0]?.message.content).toMatch(/7/);
+  });
 });
