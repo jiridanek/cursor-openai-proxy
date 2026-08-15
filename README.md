@@ -76,7 +76,7 @@ The proxy caller decides what may run. Do not “turn on safety” by adding `au
 
 Ambient Cursor MCP (`~/.cursor/mcp.json`, project `.cursor/mcp.json`, plugins) is never loaded: every agent uses `settingSources: []` and no `mcpServers`. Only tools supplied on the HTTP request are available.
 
-Chat tool follow-ups resolve by the `tool_call_id` the client already echoes back — no proxy-specific session id needed; that's what lets a plain OpenAI-compatible client complete a tool-calling round with zero awareness of this proxy's extensions. Creating a *new* tool-using conversation still needs **sticky** mode, since prefix mode rejects `tools` (an agent's tool permissions are fixed at creation time). Responses tool loops use `previous_response_id` plus `function_call_output` items; `store: false` cannot be combined with tools. Full resolution order: [SPEC.md](SPEC.md).
+Chat tool follow-ups resolve by the `tool_call_id` the client already echoes back — no proxy-specific session id needed; that's what lets a plain OpenAI-compatible client complete a tool-calling round with zero awareness of this proxy's extensions. Creating a *new* tool-using conversation still needs **sticky** mode, since prefix mode rejects `tools` (an agent's tool permissions are fixed at creation time). Responses tool loops use `previous_response_id` plus `function_call_output` items; `store: false` cannot be combined with tools. Answering only some of the currently pending tool calls is fine — the response reports whatever's still outstanding instead of erroring. Full resolution order: [SPEC.md](SPEC.md).
 
 ### CLI flags
 

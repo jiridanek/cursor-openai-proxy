@@ -351,11 +351,13 @@ export async function resumeParked(
         throw new HttpError(400, `Unknown call_id: ${output.callId}`);
       }
     }
-    for (const callId of supervisor.parks.keys()) {
-      if (!outputs.some((output) => output.callId === callId)) {
-        throw new HttpError(400, `Missing tool output for call_id: ${callId}`);
-      }
-    }
+    // Outputs need not cover every currently parked call_id: a call parked
+    // more than PARK_IDLE_MS after the first one (see collectTurn() below)
+    // arrives after the client was already told about the earlier one, so it
+    // has no way to answer it in the same round. Resolve whatever was
+    // submitted and let collectTurn() re-report anything still outstanding
+    // instead of erroring -- the client converges by answering what it's
+    // told about, one round-trip at a time.
     record.status = "in_progress";
     record.pendingToolCalls = [];
     record.outputText = "";

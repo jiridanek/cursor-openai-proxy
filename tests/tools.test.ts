@@ -25,6 +25,19 @@ const ADD_TOOL = {
   },
 };
 
+const MULTIPLY_TOOL = {
+  type: "function",
+  function: {
+    name: "multiply",
+    description: "Multiply two numbers",
+    parameters: {
+      type: "object",
+      properties: { a: { type: "number" }, b: { type: "number" } },
+      required: ["a", "b"],
+    },
+  },
+};
+
 describe("concurrent session creation", () => {
   it("dedupes two concurrent requests for the same not-yet-existing session id", async () => {
     // resolveChatSession() does registry.get() (sync) then, if absent,
@@ -714,18 +727,6 @@ describe("OpenAI tool pass-through", () => {
     // supervisor.parks map regardless, so a tool_call the fake run dispatches
     // after the idle window used to become invisible to the client forever,
     // while resumeParked() would still (correctly) demand an output for it.
-    const MULTIPLY_TOOL = {
-      type: "function",
-      function: {
-        name: "multiply",
-        description: "Multiply two numbers",
-        parameters: {
-          type: "object",
-          properties: { a: { type: "number" }, b: { type: "number" } },
-          required: ["a", "b"],
-        },
-      },
-    };
     const backend = new FakeCursorBackend({
       toolCall: { name: "add", arguments: { a: 1, b: 2 }, id: "call_first" },
       extraToolCalls: [
@@ -789,6 +790,63 @@ describe("OpenAI tool pass-through", () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
 
     expect(settled).toEqual([{ callId: "call_leak", outcome: "rejected" }]);
+  });
+
+  it("resolves a subset of pending tool calls instead of erroring on the rest", async () => {
+    // resumeParked() used to demand an output for every call_id in
+    // supervisor.parks, throwing 400 "Missing tool output for call_id" if
+    // the client's request didn't cover every one of them -- including a
+    // call the client was never even told about (see the late-park test
+    // above). This left the session permanently wedged: the throw happened
+    // before any state changed, so retrying the exact same request
+    // reproduced the same 400 forever (the real-world bug this regresses).
+    // Submitting a subset should now resolve those calls and report
+    // whatever's still outstanding, instead of failing.
+    const backend = new FakeCursorBackend({
+      concurrentToolCalls: [
+        { name: "add", arguments: { a: 1, b: 2 }, id: "call_a" },
+        { name: "multiply", arguments: { a: 3, b: 4 }, id: "call_b" },
+      ],
+    });
+    const { app } = makeApp(backend);
+
+    const first = await postJson(app, "/v1/responses", {
+      input: "add then multiply",
+      tools: [ADD_TOOL, MULTIPLY_TOOL],
+    });
+    const parked = await jsonOf<{
+      id: string;
+      status: string;
+      output: Array<{ call_id?: string }>;
+    }>(first);
+    expect(parked.status).toBe("requires_action");
+    expect(
+      parked.output.filter((item) => item.call_id).map((item) => item.call_id),
+    ).toEqual(["call_a", "call_b"]);
+
+    const partial = await postJson(app, "/v1/responses", {
+      previous_response_id: parked.id,
+      input: [{ type: "function_call_output", call_id: "call_a", output: "3" }],
+    });
+    expect(partial.status).toBe(200);
+    const afterPartial = await jsonOf<{
+      status: string;
+      output: Array<{ call_id?: string }>;
+    }>(partial);
+    expect(afterPartial.status).toBe("requires_action");
+    expect(
+      afterPartial.output
+        .filter((item) => item.call_id)
+        .map((item) => item.call_id),
+    ).toEqual(["call_b"]);
+
+    const final = await postJson(app, "/v1/responses", {
+      previous_response_id: parked.id,
+      input: [{ type: "function_call_output", call_id: "call_b", output: "12" }],
+    });
+    expect(final.status).toBe(200);
+    const completed = await jsonOf<{ status: string }>(final);
+    expect(completed.status).toBe("completed");
   });
 
   it("returns 400 for an unknown tool call_id", async () => {

@@ -239,6 +239,8 @@ If `wait()` returns `error`, skip the stop chunk and emit `data: { error: { mess
 
 Follow-up: last messages with `role: "tool"` + `tool_call_id` **resolve** the parked `execute()`; they are **not** `agent.send()`. Resolution relies **exclusively** on `tool_call_id` — no session id field (`session_id` / `cursor_session_id` / `X-Cursor-Session-Id` / `X-Session-Id`) is read for this at all, not even as a first-choice fast path: a present-but-wrong/irrelevant session id on the same request is ignored rather than hijacking or blocking the resume. The caller's own sessions are searched for one parked on the given `tool_call_id`; no live match (evicted session, restarted proxy, or the id never existed) → a fresh agent is created and the full history — including the tool call and its result — is replayed as its prompt, instead of erroring. A `tool_call_id` the matched session doesn't recognize → **400** `Unknown call_id`. A new user turn while parked → **409** `{ code: "requires_action" }`.
 
+Submitting outputs for only some of the currently parked `call_id`s does **not** error: those outputs resolve, and the turn is re-collected. Any `call_id` still outstanding — including one that parked after the previous response was already sent, past the idle-detection window used to decide a turn is done — comes back as the new `tool_calls` response instead of failing, so a caller converges by answering whatever it's currently told about.
+
 #### Chat session modes
 
 **`sticky` (default)**
@@ -311,7 +313,7 @@ Non-stream **200** (enough for `client.responses.create()` / `.output_text`):
 
 When parked: `status: "requires_action"`, `output` includes `{ type: "function_call", id, call_id, name, arguments, status: "completed" }` (and any `output_text` already produced).
 
-Next POST: `previous_response_id` + `input` items `{ type: "function_call_output", call_id, output }`. New `resp_` id, **same** Cursor agent and **same** live `Run`. Do not `send()` a user message. Unknown `call_id` → **400**.
+Next POST: `previous_response_id` + `input` items `{ type: "function_call_output", call_id, output }`. New `resp_` id, **same** Cursor agent and **same** live `Run`. Do not `send()` a user message. Unknown `call_id` → **400**. Submitting outputs for only some of the currently parked `call_id`s does not error — see the equivalent Chat "Follow-up" note above; the remaining `function_call` output item(s) simply come back on the new `requires_action` response.
 
 Stream (`event:` + `data:`):
 

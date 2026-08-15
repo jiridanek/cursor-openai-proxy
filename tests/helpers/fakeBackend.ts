@@ -61,6 +61,15 @@ export type FakeOptions = {
    */
   extraToolCalls?: Array<FakeToolCall & { delayMs: number }>;
   /**
+   * Two or more tool calls the run dispatches together and awaits via
+   * Promise.all -- unlike `toolCall` (single, awaited alone) or
+   * `extraToolCalls` (fire-and-forget, never gates completion), every entry
+   * here must resolve before the run pushes its final text and finishes.
+   * Models a genuine multi-tool-call turn where the client may resolve them
+   * one at a time across separate resumeParked() calls.
+   */
+  concurrentToolCalls?: FakeToolCall[];
+  /**
    * When set alongside `toolCall`, the run reaches a terminal error outcome
    * `errorAfterParkMs` after parking -- independent of whether `toolCall`
    * has been resolved -- to simulate the underlying run failing out from
@@ -209,6 +218,42 @@ class FakeRun implements RunHandle {
         return;
       }
       this.#push({ type: "text", text: delta });
+    }
+    const concurrentToolCalls = this.options.concurrentToolCalls;
+    if (concurrentToolCalls && concurrentToolCalls.length > 0 && this.customTools) {
+      const entries = concurrentToolCalls.map((tc) => ({
+        tc,
+        callId: tc.id ?? `call_${Math.random().toString(16).slice(2)}`,
+      }));
+      for (const { tc, callId } of entries) {
+        if (tc.skipStreamEvent) continue;
+        this.#push({
+          type: "tool_call",
+          callId,
+          name: tc.name,
+          arguments: JSON.stringify(tc.arguments),
+        });
+      }
+      const outputs = await Promise.all(
+        entries.map(async ({ tc, callId }) => {
+          const tool = this.customTools![tc.name];
+          if (!tool) return "";
+          const result = await tool.execute(tc.arguments, { toolCallId: callId });
+          return typeof result === "string" ? result : JSON.stringify(result ?? "");
+        }),
+      );
+      if (this.#cancelled) {
+        this.#finish({ status: "cancelled", result: "" });
+        return;
+      }
+      const final = `tools:${outputs.join(",")}`;
+      this.#push({ type: "text", text: final });
+      this.#finish({
+        status: "finished",
+        result: final,
+        usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+      });
+      return;
     }
     const toolCall = this.options.toolCall;
     if (toolCall && this.customTools) {
