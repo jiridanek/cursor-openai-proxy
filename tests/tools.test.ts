@@ -240,6 +240,51 @@ describe("OpenAI tool pass-through", () => {
     expect(done2.choices[0]?.message.content).toBe("sum2=11");
   });
 
+  it("serves a fresh unrelated message instead of treating stale tool history as a follow-up", async () => {
+    // A client can report a tool result (role:"tool") and then move on to a
+    // completely unrelated new message, all in the same resent history and
+    // with no session id ever sent. toolOutputsFromMessages() used to scan
+    // the *entire* messages array for role:"tool", so the stale tool
+    // exchange kept getting treated as an active follow-up on every later
+    // request in the conversation -- permanently 400ing anything sent
+    // afterward, no matter how unrelated.
+    const backend = new FakeCursorBackend({
+      toolCallSequence: [{ name: "add", arguments: { a: 1, b: 2 }, id: "call_stale" }],
+      reply: "gay.",
+    });
+    const { app } = makeApp(backend);
+
+    const first = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "add" }],
+      tools: [ADD_TOOL],
+    });
+    const parked = await jsonOf<{
+      choices: Array<{ message: { tool_calls: Array<{ id: string }> } }>;
+    }>(first);
+
+    const res = await postJson(app, "/v1/chat/completions", {
+      // deliberately no session_id / X-Cursor-Session-Id anywhere
+      tools: [ADD_TOOL],
+      messages: [
+        { role: "user", content: "add" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: parked.choices[0]!.message.tool_calls,
+        },
+        { role: "tool", tool_call_id: "call_stale", content: "error: tool not found" },
+        { role: "user", content: "say gay" },
+      ],
+    });
+    expect(res.status).toBe(200);
+    const done = await jsonOf<{
+      choices: Array<{ finish_reason: string; message: { content: string } }>;
+    }>(res);
+    expect(done.choices[0]?.finish_reason).toBe("stop");
+    expect(done.choices[0]?.message.content).toBe("gay.");
+    expect(backend.creates).toBe(2); // a fresh agent for the new, unrelated turn
+  });
+
   it("returns 400 when a tool follow-up omits the session id", async () => {
     const { app } = makeApp(
       new FakeCursorBackend({

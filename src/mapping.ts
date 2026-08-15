@@ -120,13 +120,19 @@ export function parseFunctionTools(
 export function toolOutputsFromMessages(
   messages: readonly ChatMessage[],
 ): FunctionCallOutput[] {
+  // Only the *trailing* run of role:"tool" messages is a live follow-up.
+  // OpenAI clients resend the full history on every request, so an older
+  // tool exchange sitting earlier in `messages` is just history -- if the
+  // client has since moved on to a new user/assistant turn, that trailing
+  // message is what this request actually is, not a stale tool result.
   const outputs: FunctionCallOutput[] = [];
-  for (const message of messages) {
-    if (message.role !== "tool") continue;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i]!;
+    if (message.role !== "tool") break;
     if (!message.tool_call_id) {
       throw new HttpError(400, "Tool message is missing tool_call_id");
     }
-    outputs.push({
+    outputs.unshift({
       callId: message.tool_call_id,
       output: flattenContent(message.content),
     });
