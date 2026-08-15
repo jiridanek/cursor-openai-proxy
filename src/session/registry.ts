@@ -64,9 +64,39 @@ function sessionKey(callerKeyHash: string, id: string): string {
 export class SessionRegistry {
   readonly #byKey = new Map<string, SessionRecord>();
   readonly #ids = new Map<string, Set<string>>();
+  readonly #creating = new Map<string, Promise<SessionRecord>>();
 
   get(callerKeyHash: string, id: string): SessionRecord | undefined {
     return this.#byKey.get(sessionKey(callerKeyHash, id));
+  }
+
+  /**
+   * Atomically look up `aliasId`, or create it via `factory` if absent.
+   * Concurrent callers for the same (callerKeyHash, aliasId) that arrive
+   * before `factory` resolves share the same in-flight promise instead of
+   * each racing their own factory call.
+   */
+  async getOrCreate(
+    callerKeyHash: string,
+    aliasId: string,
+    factory: () => Promise<SessionRecord>,
+  ): Promise<SessionRecord> {
+    const key = sessionKey(callerKeyHash, aliasId);
+    const existing = this.#byKey.get(key);
+    if (existing) return existing;
+    const pending = this.#creating.get(key);
+    if (pending) return pending;
+    const promise = factory()
+      .then((record) => {
+        this.set(record);
+        this.alias(callerKeyHash, aliasId, record);
+        return record;
+      })
+      .finally(() => {
+        this.#creating.delete(key);
+      });
+    this.#creating.set(key, promise);
+    return promise;
   }
 
   existsUnderAnyCaller(id: string): boolean {

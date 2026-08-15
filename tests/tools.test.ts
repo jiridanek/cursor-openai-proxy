@@ -25,6 +25,34 @@ const ADD_TOOL = {
   },
 };
 
+describe("concurrent session creation", () => {
+  it("dedupes two concurrent requests for the same not-yet-existing session id", async () => {
+    // resolveChatSession() does registry.get() (sync) then, if absent,
+    // awaits agent creation before registry.set(). Two requests racing on
+    // the same explicit session_id both read `undefined` from get() before
+    // either finishes creating -- without getOrCreate()'s in-flight-promise
+    // dedup, both would spin up a separate FakeCursorBackend agent under the
+    // same id, leaking one and leaving conversation state to whichever
+    // creation happened to finish last.
+    const backend = new FakeCursorBackend({ reply: "hi" });
+    const { app } = makeApp(backend);
+
+    const [first, second] = await Promise.all([
+      postJson(app, "/v1/chat/completions", {
+        session_id: "sess_race",
+        messages: [{ role: "user", content: "one" }],
+      }),
+      postJson(app, "/v1/chat/completions", {
+        session_id: "sess_race",
+        messages: [{ role: "user", content: "two" }],
+      }),
+    ]);
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(backend.creates).toBe(1);
+  });
+});
+
 describe("OpenAI tool pass-through", () => {
   it("treats empty tools as text-only", async () => {
     const backend = new FakeCursorBackend({ reply: "ok" });

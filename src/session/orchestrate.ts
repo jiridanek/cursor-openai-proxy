@@ -166,6 +166,28 @@ export async function resolveChatSession(opts: {
       }
       return { record: existing, prompt: lastUserText(opts.body.messages) };
     }
+
+    // No session exists yet under this id. getOrCreate() dedupes concurrent
+    // requests racing to create it: only the first caller's factory actually
+    // runs; later callers (in flight before it resolves) share its result
+    // instead of each spinning up their own Cursor agent under the same id.
+    const record = await opts.registry.getOrCreate(
+      opts.callerKeyHash,
+      lookupId,
+      () =>
+        createAgentRecord({
+          backend: opts.backend,
+          config: opts.config,
+          callerKeyHash: opts.callerKeyHash,
+          apiKey: opts.apiKey,
+          model: opts.model,
+          id: opts.config.sessionMode === "sticky" ? lookupId : newId("sess_"),
+          stored: true,
+          effort,
+          passThroughTools: passThrough,
+        }),
+    );
+    return { record, prompt: flattenMessages(opts.body.messages) };
   }
 
   const record = await createChatSession({
@@ -177,7 +199,6 @@ export async function resolveChatSession(opts: {
     model: opts.model,
     effort,
     passThroughTools: passThrough,
-    id: opts.config.sessionMode === "sticky" ? stickyId : undefined,
   });
   return { record, prompt: flattenMessages(opts.body.messages) };
 }
