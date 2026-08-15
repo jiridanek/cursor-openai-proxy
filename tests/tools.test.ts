@@ -443,6 +443,64 @@ describe("OpenAI tool pass-through", () => {
     expect(res.status).toBe(501);
   });
 
+  it("surfaces a tool call parked after the idle window on a later status check", async () => {
+    // waitForParkIdle() treats "no new park for PARK_IDLE_MS" as "turn done"
+    // and collectTurn() used to freeze record.pendingToolCalls at that
+    // instant. wrapCustomTools().execute() keeps adding to the live
+    // supervisor.parks map regardless, so a tool_call the fake run dispatches
+    // after the idle window used to become invisible to the client forever,
+    // while resumeParked() would still (correctly) demand an output for it.
+    const MULTIPLY_TOOL = {
+      type: "function",
+      function: {
+        name: "multiply",
+        description: "Multiply two numbers",
+        parameters: {
+          type: "object",
+          properties: { a: { type: "number" }, b: { type: "number" } },
+          required: ["a", "b"],
+        },
+      },
+    };
+    const backend = new FakeCursorBackend({
+      toolCall: { name: "add", arguments: { a: 1, b: 2 }, id: "call_first" },
+      extraToolCalls: [
+        { name: "multiply", arguments: { a: 3, b: 4 }, id: "call_late", delayMs: 80 },
+      ],
+    });
+    const { app } = makeApp(backend);
+
+    const first = await postJson(app, "/v1/responses", {
+      input: "add then multiply",
+      tools: [ADD_TOOL, MULTIPLY_TOOL],
+    });
+    const parked = await jsonOf<{
+      id: string;
+      status: string;
+      output: Array<{ call_id?: string }>;
+    }>(first);
+    expect(parked.status).toBe("requires_action");
+    expect(
+      parked.output.filter((item) => item.call_id).map((item) => item.call_id),
+    ).toEqual(["call_first"]);
+
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const stored = await app.request(`/v1/responses/${parked.id}`, {
+      headers: authHeaders(),
+    });
+    const status = await jsonOf<{
+      status: string;
+      output: Array<{ call_id?: string }>;
+    }>(stored);
+    expect(status.status).toBe("requires_action");
+    const callIds = status.output
+      .filter((item) => item.call_id)
+      .map((item) => item.call_id);
+    expect(callIds).toContain("call_first");
+    expect(callIds).toContain("call_late");
+  });
+
   it("returns 400 for an unknown tool call_id", async () => {
     const backend = new FakeCursorBackend({
       toolCall: { name: "add", arguments: { a: 1, b: 2 }, id: "call_test" },

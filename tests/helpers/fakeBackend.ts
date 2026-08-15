@@ -35,6 +35,13 @@ export type FakeOptions = {
    * tool-calling rounds (each its own run/supervisor) on one sticky session.
    */
   toolCallSequence?: FakeToolCall[];
+  /**
+   * Additional tool calls dispatched `delayMs` after `toolCall` parks,
+   * independent of whether `toolCall` has been resolved yet. Lets a test
+   * simulate the underlying SDK emitting a second tool_call for the same
+   * turn later than the idle-park heuristic's window.
+   */
+  extraToolCalls?: Array<FakeToolCall & { delayMs: number }>;
 };
 
 export class FakeCursorBackend implements CursorBackend {
@@ -186,6 +193,9 @@ class FakeRun implements RunHandle {
         name: toolCall.name,
         arguments: argsJson,
       });
+      for (const extra of this.options.extraToolCalls ?? []) {
+        void this.#dispatchExtra(extra);
+      }
       const tool = this.customTools[toolCall.name];
       let output = "";
       if (tool) {
@@ -221,6 +231,25 @@ class FakeRun implements RunHandle {
       result: this.#reply(),
       usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
     });
+  }
+
+  async #dispatchExtra(tc: FakeToolCall & { delayMs: number }): Promise<void> {
+    await new Promise<void>((resolve) => setTimeout(resolve, tc.delayMs));
+    if (!this.customTools) return;
+    const callId = tc.id ?? `call_${Math.random().toString(16).slice(2)}`;
+    this.#push({
+      type: "tool_call",
+      callId,
+      name: tc.name,
+      arguments: JSON.stringify(tc.arguments),
+    });
+    const tool = this.customTools[tc.name];
+    if (!tool) return;
+    // This park is intentionally left unresolved -- it models a call the
+    // test never answers, only checks for visibility in pendingToolCalls.
+    await Promise.resolve(tool.execute(tc.arguments, { toolCallId: callId })).catch(
+      () => undefined,
+    );
   }
 
   #reply(): string {

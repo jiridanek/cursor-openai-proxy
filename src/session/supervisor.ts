@@ -192,7 +192,6 @@ async function collectTurn(
   ]);
 
   if (supervisor.idleTimer) clearTimeout(supervisor.idleTimer);
-  supervisor.onPark = undefined;
 
   if (
     parked === "parked" &&
@@ -202,6 +201,19 @@ async function collectTurn(
     record.status = "requires_action";
     record.outputText = supervisor.outputText;
     record.pendingToolCalls = publicCalls(supervisor.parks);
+    // PARK_IDLE_MS is a heuristic, not an authoritative "turn done" signal
+    // from the SDK: wrapCustomTools().execute() keeps parking new calls into
+    // supervisor.parks regardless of onPark, so a tool_call dispatched more
+    // than PARK_IDLE_MS after the first one would otherwise be added to a
+    // live map that record.pendingToolCalls (the only client-visible view of
+    // it) never re-synced with -- permanently wedging the session, since
+    // resumeParked() requires an output for every parked call_id including
+    // ones the client was never told about. Keep onPark live for as long as
+    // the record sits in requires_action so a late park is reflected on the
+    // next status check instead of being invisible forever.
+    supervisor.onPark = () => {
+      record.pendingToolCalls = publicCalls(supervisor.parks);
+    };
     supervisor.listener = undefined;
     return {
       status: "requires_action",
@@ -210,6 +222,7 @@ async function collectTurn(
     };
   }
 
+  supervisor.onPark = undefined;
   const outcome = await supervisor.waitDone;
   await supervisor.streamDone.catch(() => undefined);
   applyOutcome(record, outcome, supervisor.outputText);
