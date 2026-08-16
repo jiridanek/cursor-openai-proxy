@@ -22,14 +22,30 @@ export type ChatChunk = {
   }>;
 };
 
-export function chatRoleChunk(id: string, created: number, model: string): ChatChunk {
+// Shared envelope for the five chunk builders below: each supplies only its
+// own `delta` (and `finishReason`, for the finish chunk) and injects it here
+// -- same shell/injected-payload split as mapping.ts's catalogParam(). Kept
+// as named functions rather than one generic builder because each name is
+// an OpenAI-wire-meaningful concept (role/content/reasoning/tool-call/finish),
+// not incidental duplication -- see ARCHITECTURE.md.
+function chatChunk(
+  id: string,
+  created: number,
+  model: string,
+  delta: ChatChunk["choices"][0]["delta"],
+  finishReason: string | null = null,
+): ChatChunk {
   return {
     id,
     object: "chat.completion.chunk",
     created,
     model,
-    choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }],
+    choices: [{ index: 0, delta, finish_reason: finishReason }],
   };
+}
+
+export function chatRoleChunk(id: string, created: number, model: string): ChatChunk {
+  return chatChunk(id, created, model, { role: "assistant" });
 }
 
 export function chatDeltaChunk(
@@ -38,13 +54,7 @@ export function chatDeltaChunk(
   model: string,
   content: string,
 ): ChatChunk {
-  return {
-    id,
-    object: "chat.completion.chunk",
-    created,
-    model,
-    choices: [{ index: 0, delta: { content }, finish_reason: null }],
-  };
+  return chatChunk(id, created, model, { content });
 }
 
 export function chatReasoningChunk(
@@ -53,15 +63,7 @@ export function chatReasoningChunk(
   model: string,
   reasoningContent: string,
 ): ChatChunk {
-  return {
-    id,
-    object: "chat.completion.chunk",
-    created,
-    model,
-    choices: [
-      { index: 0, delta: { reasoning_content: reasoningContent }, finish_reason: null },
-    ],
-  };
+  return chatChunk(id, created, model, { reasoning_content: reasoningContent });
 }
 
 export function chatToolCallChunk(
@@ -70,19 +72,7 @@ export function chatToolCallChunk(
   model: string,
   toolCall: ChatToolCallDelta,
 ): ChatChunk {
-  return {
-    id,
-    object: "chat.completion.chunk",
-    created,
-    model,
-    choices: [
-      {
-        index: 0,
-        delta: { tool_calls: [toolCall] },
-        finish_reason: null,
-      },
-    ],
-  };
+  return chatChunk(id, created, model, { tool_calls: [toolCall] });
 }
 
 export function chatFinishChunk(
@@ -91,13 +81,7 @@ export function chatFinishChunk(
   model: string,
   finishReason: "stop" | "tool_calls",
 ): ChatChunk {
-  return {
-    id,
-    object: "chat.completion.chunk",
-    created,
-    model,
-    choices: [{ index: 0, delta: {}, finish_reason: finishReason }],
-  };
+  return chatChunk(id, created, model, {}, finishReason);
 }
 
 export type ChatUsageChunk = {
