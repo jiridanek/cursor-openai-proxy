@@ -138,6 +138,15 @@ Default `model` when omitted or blank: `auto`. Two distinct model-failure shapes
 
 `context` and `thinking` (chat and responses, top-level strings) map onto `model.params` the same way as `reasoning_effort` — only when the target model's catalog entry declares a parameter with that id and the requested value is one of its declared values, otherwise silently ignored. Unlike `fast`, neither has a default applied when unset: there's no known backend-side issue with leaving them unset (see `docs/dev/model-availability-map.md`), so they're opt-in only. `claude-sonnet-5` is the model observed to expose these today (`context`: `"300k"`/`"1m"`, `thinking`: `"false"`/`"true"`).
 
+### Reasoning summaries
+
+`run.stream()` emits a distinct `type: "thinking"` event (`SDKThinkingMessage`) carrying the provider's own summarized reasoning text — not a raw chain-of-thought trace, which Cursor doesn't expose. This proxy forwards that summary, since it's useful live feedback while a long turn is in progress:
+
+- Chat: streamed as its own SSE chunk, `delta: { reasoning_content: "…" }` (never combined with `content` in the same chunk) — the de facto convention several OpenAI-compatible gateways (DeepSeek, OpenRouter) already use, since Chat Completions has no OpenAI-native reasoning concept. The non-stream/final object includes the same accumulated text as `message.reasoning_content`, omitted entirely (not `""`) when the run produced none.
+- Responses: streamed as `response.reasoning_summary_text.delta` events (`{ item_id, output_index, summary_index, delta }`), matching OpenAI's own real Responses API event name for this. The stored/final object gets a `{ type: "reasoning", id: "rs_…", summary: [{ type: "summary_text", text }] }` item in `output`, ordered before the message/function_call items — omitted entirely when there was no thinking output.
+
+Every other raw `SDKMessage` type from `run.stream()` — `"system"`, `"status"`, `"request"`, `"task"`, `"usage"` — has no branch anywhere in this proxy's stream translation (`wrapRun()`, `src/cursor/sdkBackend.ts`) and is silently dropped; only `"assistant"`, `"tool_call"`, and `"thinking"` are handled.
+
 ### Tool pass-through
 
 OpenAI `type: "function"` tools are registered as `local.customTools` on `agent.send()`. When the model calls one, `execute()` **parks** (promise keyed by SDK `toolCallId` = OpenAI `call_id`). The HTTP turn ends with Chat `finish_reason: "tool_calls"` or Responses `status: "requires_action"`. The Cursor `Run` stays alive. The next client POST supplies the tool result and **resolves** the parked promise; it is **not** `agent.send()`.

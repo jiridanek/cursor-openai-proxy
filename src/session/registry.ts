@@ -48,6 +48,7 @@ export type SessionRecord = {
   supervisor?: RunSupervisor;
   pendingToolCalls?: PendingToolCall[];
   outputText: string;
+  reasoningText: string;
   status: SessionStatus;
   model: string;
   createdAt: number;

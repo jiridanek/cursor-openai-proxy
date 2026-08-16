@@ -4,6 +4,7 @@ import type { ProxyConfig } from "./config.ts";
 import {
   chatDeltaChunk,
   chatFinishChunk,
+  chatReasoningChunk,
   chatRoleChunk,
   chatToolCallChunk,
   chatUsageChunk,
@@ -11,6 +12,7 @@ import {
 import {
   responseFunctionCallArgumentsDeltaEvent,
   responseOutputTextDeltaEvent,
+  responseReasoningSummaryTextDeltaEvent,
 } from "./codec/responsesSse.ts";
 import { writeDone, writeJsonSse } from "./codec/sse.ts";
 import type { CursorBackend, StreamEvent } from "./cursor/backend.ts";
@@ -78,6 +80,7 @@ function responseFromRecord(
     id: extra?.id ?? record.id,
     model: record.model,
     text: extra?.text ?? record.outputText,
+    reasoningText: record.reasoningText,
     status,
     previousResponseId: record.previousResponseId,
     createdAt: extra?.createdAt ?? record.createdAt,
@@ -107,7 +110,7 @@ async function executeTurn(
 }
 
 function toolCallStreamer(): {
-  onEvent: (event: StreamEvent) => {
+  onEvent: (event: Extract<StreamEvent, { type: "text" | "tool_call" }>) => {
     kind: "text" | "tool_call";
     text?: string;
     callId?: string;
@@ -251,6 +254,13 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
           resume,
           tools,
           async (event) => {
+            if (event.type === "thinking") {
+              await writeJsonSse(
+                stream,
+                chatReasoningChunk(completionId, created, model, event.text),
+              );
+              return;
+            }
             const mapped = tracker.onEvent(event);
             if (!mapped) return;
             if (mapped.kind === "text" && mapped.text) {
@@ -347,6 +357,7 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
         id: completionId,
         model,
         text: result.text,
+        reasoningText: result.reasoningText,
         created,
         usage: record.usage,
         toolCalls:
@@ -404,6 +415,14 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
           resume,
           tools,
           async (event) => {
+            if (event.type === "thinking") {
+              const delta = responseReasoningSummaryTextDeltaEvent({
+                responseId,
+                delta: event.text,
+              });
+              await writeJsonSse(stream, delta.data, delta.event);
+              return;
+            }
             const mapped = tracker.onEvent(event);
             if (!mapped) return;
             if (mapped.kind === "text" && mapped.text) {

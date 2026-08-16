@@ -38,6 +38,58 @@ describe("POST /v1/responses", () => {
     expect(backend.sends[1]?.agentId).toBe(backend.sends[0]?.agentId);
   });
 
+  it("includes a reasoning output item when the run produced thinking output", async () => {
+    const backend = new FakeCursorBackend({
+      thinkingDeltas: ["step 1", "step 2"],
+      reply: "done",
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/responses", { input: "hi" });
+    const body = await jsonOf<{
+      id: string;
+      output: Array<{ type: string; summary?: Array<{ type: string; text: string }> }>;
+    }>(res);
+    const reasoning = body.output.find((item) => item.type === "reasoning");
+    expect(reasoning?.summary).toEqual([{ type: "summary_text", text: "step 1step 2" }]);
+
+    const stored = await app.request(`/v1/responses/${body.id}`, {
+      headers: authHeaders(),
+    });
+    const storedBody = await jsonOf<{ output: Array<{ type: string }> }>(stored);
+    expect(storedBody.output.some((item) => item.type === "reasoning")).toBe(true);
+  });
+
+  it("omits the reasoning output item entirely when the run produced no thinking output", async () => {
+    const backend = new FakeCursorBackend({ reply: "done" });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/responses", { input: "hi" });
+    const body = await jsonOf<{ output: Array<{ type: string }> }>(res);
+    expect(body.output.some((item) => item.type === "reasoning")).toBe(false);
+  });
+
+  it("streams response.reasoning_summary_text.delta events", async () => {
+    const backend = new FakeCursorBackend({
+      thinkingDeltas: ["Let me ", "think..."],
+      reply: "done",
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/responses", { input: "hi", stream: true });
+    const frames = (await res.text())
+      .split("\n\n")
+      .filter(Boolean)
+      .map((block) => {
+        const lines = block.split("\n");
+        return {
+          event: lines.find((l) => l.startsWith("event: "))?.replace("event: ", ""),
+          data: JSON.parse(lines.find((l) => l.startsWith("data: "))!.replace("data: ", "")),
+        };
+      });
+    const reasoningDeltas = frames.filter(
+      (frame) => frame.event === "response.reasoning_summary_text.delta",
+    );
+    expect(reasoningDeltas.map((frame) => frame.data.delta)).toEqual(["Let me ", "think..."]);
+  });
+
   it("returns 400 for an unknown previous_response_id", async () => {
     const { app } = makeApp();
     const res = await postJson(app, "/v1/responses", {

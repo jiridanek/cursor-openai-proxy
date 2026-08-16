@@ -20,6 +20,7 @@ export type RunListener = (event: StreamEvent) => Promise<void> | void;
 export type TurnResult = {
   status: SessionRecord["status"];
   text: string;
+  reasoningText: string;
   toolCalls: PendingToolCall[];
 };
 
@@ -33,6 +34,7 @@ export type RunSupervisor = {
   parks: Map<string, ParkedExecute>;
   itemIds: Map<string, string>;
   outputText: string;
+  reasoningText: string;
   listener?: RunListener;
   onPark?: () => void;
   idleTimer?: ReturnType<typeof setTimeout>;
@@ -68,12 +70,13 @@ function stringifyArgs(args: unknown): string {
 
 function newSupervisorState(): Pick<
   RunSupervisor,
-  "parks" | "itemIds" | "outputText" | "waitSettled"
+  "parks" | "itemIds" | "outputText" | "reasoningText" | "waitSettled"
 > {
   return {
     parks: new Map(),
     itemIds: new Map(),
     outputText: "",
+    reasoningText: "",
     waitSettled: false,
   };
 }
@@ -140,6 +143,11 @@ function attachRun(supervisor: RunSupervisor, run: RunHandle): void {
       // emitted it before calling execute() -- the client would see the
       // model announce a tool call in text, then nothing, with the turn
       // still ending in finish_reason:"tool_calls".
+      if (event.type === "thinking") {
+        supervisor.reasoningText += event.text;
+        if (supervisor.listener) await supervisor.listener(event);
+        continue;
+      }
       if (event.type !== "text") continue;
       supervisor.outputText += event.text;
       if (supervisor.listener) await supervisor.listener(event);
@@ -205,6 +213,8 @@ async function collectTurn(
   if (resetText) {
     record.outputText = "";
     supervisor.outputText = "";
+    record.reasoningText = "";
+    supervisor.reasoningText = "";
   }
   supervisor.listener = onEvent;
   record.status = "in_progress";
@@ -224,6 +234,7 @@ async function collectTurn(
   ) {
     record.status = "requires_action";
     record.outputText = supervisor.outputText;
+    record.reasoningText = supervisor.reasoningText;
     record.pendingToolCalls = publicCalls(supervisor.parks);
     // PARK_IDLE_MS is a heuristic, not an authoritative "turn done" signal
     // from the SDK: wrapCustomTools().execute() keeps parking new calls into
@@ -242,6 +253,7 @@ async function collectTurn(
     return {
       status: "requires_action",
       text: record.outputText,
+      reasoningText: record.reasoningText,
       toolCalls: record.pendingToolCalls,
     };
   }
@@ -266,6 +278,7 @@ async function collectTurn(
     supervisor.parks.clear();
   }
   applyOutcome(record, outcome, supervisor.outputText);
+  record.reasoningText = supervisor.reasoningText;
   supervisor.listener = undefined;
   const stored = record.stored;
   const agent = record.agent;
@@ -274,6 +287,7 @@ async function collectTurn(
   return {
     status: record.status,
     text: record.outputText,
+    reasoningText: record.reasoningText,
     toolCalls: [],
   };
 }
@@ -362,6 +376,8 @@ export async function resumeParked(
     record.pendingToolCalls = [];
     record.outputText = "";
     supervisor.outputText = "";
+    record.reasoningText = "";
+    supervisor.reasoningText = "";
     supervisor.listener = onEvent;
     for (const output of outputs) {
       const park = supervisor.parks.get(output.callId);

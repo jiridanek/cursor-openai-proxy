@@ -104,6 +104,8 @@ Chat tool follow-ups resolve by the `tool_call_id` the client already echoes bac
 
 Not implemented (501): embeddings, vision, `/v1/completions`, non-function tool types, `n != 1`, `logprobs`. Sampling knobs and `response_format` are accepted and ignored.
 
+Reasoning-model summaries (Cursor's own condensed reasoning text, not a raw trace) are forwarded as they arrive: Chat gets `reasoning_content` (streamed delta chunks and the final message), Responses gets `response.reasoning_summary_text.delta` events and a `reasoning` output item — omitted entirely when a run produced none. See [SPEC.md](SPEC.md) for the exact shapes.
+
 ### Chat session modes
 
 `--session-mode sticky` (default): a tool-result follow-up (trailing `role: "tool"` message(s)) resolves by `tool_call_id` alone — no session id involved at all. Otherwise (plain-text turns): reuse `extra_body.session_id` / `cursor_session_id` or headers `X-Cursor-Session-Id` / `X-Session-Id`. If absent, create an agent and return the id in `X-Cursor-Session-Id`. Follow-ups `send()` only the latest user turn.

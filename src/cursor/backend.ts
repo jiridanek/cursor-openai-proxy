@@ -34,6 +34,7 @@ export type RunOutcome = {
 
 export type StreamEvent =
   | { type: "text"; text: string }
+  | { type: "thinking"; text: string }
   | { type: "tool_call"; callId: string; name: string; arguments: string };
 
 export type CustomToolExecute = (

@@ -338,10 +338,14 @@ export function toChatCompletion(opts: {
   id?: string;
   model: string;
   text: string;
+  reasoningText?: string;
   usage?: TokenUsage;
   created?: number;
   toolCalls?: readonly PendingToolCall[];
 }) {
+  const reasoning = opts.reasoningText
+    ? { reasoning_content: opts.reasoningText }
+    : {};
   if (opts.toolCalls && opts.toolCalls.length > 0) {
     return {
       id: opts.id ?? newId("chatcmpl_"),
@@ -354,6 +358,7 @@ export function toChatCompletion(opts: {
           message: {
             role: "assistant" as const,
             content: null,
+            ...reasoning,
             tool_calls: opts.toolCalls.map((call) => ({
               id: call.callId,
               type: "function" as const,
@@ -374,7 +379,7 @@ export function toChatCompletion(opts: {
     choices: [
       {
         index: 0,
-        message: { role: "assistant" as const, content: opts.text },
+        message: { role: "assistant" as const, content: opts.text, ...reasoning },
         finish_reason: "stop" as const,
       },
     ],
@@ -386,6 +391,7 @@ export function toResponseObject(opts: {
   id: string;
   model: string;
   text: string;
+  reasoningText?: string;
   status: string;
   previousResponseId?: string | null;
   usage?: TokenUsage;
@@ -394,6 +400,13 @@ export function toResponseObject(opts: {
   toolCalls?: readonly PendingToolCall[];
 }) {
   const output: Array<Record<string, unknown>> = [];
+  if (opts.reasoningText) {
+    output.push({
+      type: "reasoning" as const,
+      id: newId("rs_"),
+      summary: [{ type: "summary_text" as const, text: opts.reasoningText }],
+    });
+  }
   if (opts.text || !opts.toolCalls?.length) {
     output.push({
       type: "message" as const,

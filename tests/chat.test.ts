@@ -38,6 +38,65 @@ describe("POST /v1/chat/completions", () => {
     expect(res.headers.get("X-Cursor-Session-Id")).toMatch(/^sess_/);
   });
 
+  it("includes reasoning_content in the final message when the run produced thinking output", async () => {
+    const backend = new FakeCursorBackend({
+      thinkingDeltas: ["step 1", "step 2"],
+      reply: "done",
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const body = await jsonOf<{
+      choices: Array<{ message: { reasoning_content?: string; content: string } }>;
+    }>(res);
+    expect(body.choices[0]?.message.reasoning_content).toBe("step 1step 2");
+    expect(body.choices[0]?.message.content).toBe("done");
+  });
+
+  it("omits reasoning_content entirely when the run produced no thinking output", async () => {
+    const backend = new FakeCursorBackend({ reply: "done" });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const body = await jsonOf<{ choices: Array<{ message: Record<string, unknown> }> }>(res);
+    expect("reasoning_content" in body.choices[0]!.message).toBe(false);
+  });
+
+  it("streams reasoning_content chunks separately from content chunks", async () => {
+    const backend = new FakeCursorBackend({
+      thinkingDeltas: ["Let me ", "think..."],
+      deltas: ["Hel", "lo"],
+    });
+    const { app } = makeApp(backend);
+    const res = await postJson(app, "/v1/chat/completions", {
+      stream: true,
+      messages: [{ role: "user", content: "hi" }],
+    });
+    const frames = (await res.text())
+      .split("\n\n")
+      .map((line) => line.replace(/^data: /, "").trim())
+      .filter((line) => line && line !== "[DONE]")
+      .map((line) => JSON.parse(line));
+
+    const reasoningFrames = frames.filter(
+      (frame) => frame.choices?.[0]?.delta?.reasoning_content !== undefined,
+    );
+    expect(reasoningFrames.map((frame) => frame.choices[0].delta.reasoning_content)).toEqual([
+      "Let me ",
+      "think...",
+    ]);
+    expect(reasoningFrames.every((frame) => frame.choices[0].delta.content === undefined)).toBe(
+      true,
+    );
+
+    const contentFrames = frames.filter(
+      (frame) => frame.choices?.[0]?.delta?.content !== undefined,
+    );
+    expect(contentFrames.map((frame) => frame.choices[0].delta.content)).toEqual(["Hel", "lo"]);
+  });
+
   it("snapshots streaming SSE frames", async () => {
     const backend = new FakeCursorBackend({
       reply: "Hello",

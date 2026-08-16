@@ -118,6 +118,10 @@ function wrapRun(run: SdkRun): RunHandle {
             name: event.name,
             arguments: stringifyArgs(event.args),
           };
+          continue;
+        }
+        if (event.type === "thinking" && event.text) {
+          yield { type: "thinking", text: event.text };
         }
       }
     },

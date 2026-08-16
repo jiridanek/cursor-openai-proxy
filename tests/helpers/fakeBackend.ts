@@ -44,6 +44,8 @@ export type FakeToolCall = {
 export type FakeOptions = {
   reply?: string | ((prompt: string) => string);
   deltas?: string[];
+  /** Pushed as "thinking" stream events, before `deltas`, to simulate the SDK's reasoning-summary stream. */
+  thinkingDeltas?: string[];
   hangUntilCancel?: boolean;
   runError?: { message: string; code?: string };
   toolCall?: FakeToolCall;
@@ -210,6 +212,13 @@ class FakeRun implements RunHandle {
     if (this.options.runError) {
       this.#finish({ status: "error", error: this.options.runError });
       return;
+    }
+    for (const delta of this.options.thinkingDeltas ?? []) {
+      if (this.#cancelled) {
+        this.#finish({ status: "cancelled", result: "" });
+        return;
+      }
+      this.#push({ type: "thinking", text: delta });
     }
     const deltas = this.options.deltas ?? (this.options.toolCall ? [] : [this.#reply()]);
     for (const delta of deltas) {

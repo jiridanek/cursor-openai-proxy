@@ -22,6 +22,33 @@ export function responseOutputTextDeltaEvent(opts: {
   };
 }
 
+export function responseReasoningSummaryTextDeltaEvent(opts: {
+  responseId: string;
+  delta: string;
+  outputIndex?: number;
+  summaryIndex?: number;
+}): {
+  event: string;
+  data: {
+    type: "response.reasoning_summary_text.delta";
+    item_id: string;
+    output_index: number;
+    summary_index: number;
+    delta: string;
+  };
+} {
+  return {
+    event: "response.reasoning_summary_text.delta",
+    data: {
+      type: "response.reasoning_summary_text.delta",
+      item_id: opts.responseId,
+      output_index: opts.outputIndex ?? 0,
+      summary_index: opts.summaryIndex ?? 0,
+      delta: opts.delta,
+    },
+  };
+}
+
 export function responseFunctionCallArgumentsDeltaEvent(opts: {
   itemId: string;
   delta: string;

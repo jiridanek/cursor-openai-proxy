@@ -15,6 +15,7 @@ export type ChatChunk = {
     delta: {
       role?: "assistant";
       content?: string;
+      reasoning_content?: string;
       tool_calls?: ChatToolCallDelta[];
     };
     finish_reason: string | null;
@@ -43,6 +44,23 @@ export function chatDeltaChunk(
     created,
     model,
     choices: [{ index: 0, delta: { content }, finish_reason: null }],
+  };
+}
+
+export function chatReasoningChunk(
+  id: string,
+  created: number,
+  model: string,
+  reasoningContent: string,
+): ChatChunk {
+  return {
+    id,
+    object: "chat.completion.chunk",
+    created,
+    model,
+    choices: [
+      { index: 0, delta: { reasoning_content: reasoningContent }, finish_reason: null },
+    ],
   };
 }
 
