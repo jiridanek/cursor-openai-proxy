@@ -566,15 +566,47 @@ export function fastParam(
   return { id: "fast", value };
 }
 
+// Unlike `fast`, neither `context` nor `thinking` has a known backend-side
+// admin-block-on-unset issue (see docs/dev/model-availability-map.md), so
+// these are opt-in only -- no default is applied when the caller doesn't ask
+// for a specific value.
+export function contextParam(
+  catalog: ModelCatalogEntry[],
+  modelId: string,
+  context: string | undefined,
+): { id: string; value: string } | undefined {
+  if (!context) return undefined;
+  const param = findCatalogParam(catalog, modelId, ["context"]);
+  if (!param) return undefined;
+  if (!param.values.some((value) => value.value === context)) return undefined;
+  return { id: param.id, value: context };
+}
+
+export function thinkingParam(
+  catalog: ModelCatalogEntry[],
+  modelId: string,
+  thinking: string | undefined,
+): { id: string; value: string } | undefined {
+  if (!thinking) return undefined;
+  const param = findCatalogParam(catalog, modelId, ["thinking"]);
+  if (!param) return undefined;
+  if (!param.values.some((value) => value.value === thinking)) return undefined;
+  return { id: param.id, value: thinking };
+}
+
 export function modelParams(
   catalog: ModelCatalogEntry[],
   modelId: string,
-  opts: { effort?: string; fast?: string },
+  opts: { effort?: string; fast?: string; context?: string; thinking?: string },
 ): Array<{ id: string; value: string }> | undefined {
   const fast = fastParam(catalog, modelId, opts.fast);
+  const context = contextParam(catalog, modelId, opts.context);
+  const thinking = thinkingParam(catalog, modelId, opts.thinking);
   const params = [
     ...(effortParams(catalog, modelId, opts.effort) ?? []),
     ...(fast ? [fast] : []),
+    ...(context ? [context] : []),
+    ...(thinking ? [thinking] : []),
   ];
   return params.length > 0 ? params : undefined;
 }

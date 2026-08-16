@@ -36,6 +36,8 @@ export const ChatCompletionRequest = Schema.Struct({
   parallel_tool_calls: Schema.optional(Schema.Boolean),
   reasoning_effort: Schema.optional(Schema.String),
   fast: Schema.optional(Schema.String),
+  context: Schema.optional(Schema.String),
+  thinking: Schema.optional(Schema.String),
   session_id: Schema.optional(Schema.String),
   cursor_session_id: Schema.optional(Schema.String),
 });
@@ -62,6 +64,8 @@ export const ResponsesRequest = Schema.Struct({
   reasoning: Schema.optional(Reasoning),
   reasoning_effort: Schema.optional(Schema.String),
   fast: Schema.optional(Schema.String),
+  context: Schema.optional(Schema.String),
+  thinking: Schema.optional(Schema.String),
 });
 export type ResponsesRequest = Schema.Schema.Type<typeof ResponsesRequest>;
 

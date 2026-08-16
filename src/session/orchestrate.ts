@@ -49,6 +49,8 @@ async function createAgentRecord(opts: {
   previousResponseId?: string | null;
   effort?: string;
   fast?: string;
+  context?: string;
+  thinking?: string;
   passThroughTools?: boolean;
 }): Promise<SessionRecord> {
   // The catalog is always needed now, not just when `effort` is requested:
@@ -65,6 +67,8 @@ async function createAgentRecord(opts: {
     params: modelParams(catalog, opts.model, {
       effort: opts.effort,
       fast: opts.fast,
+      context: opts.context,
+      thinking: opts.thinking,
     }),
     tools: sdkToolAllowlist(
       opts.config.agentMode,
@@ -95,6 +99,8 @@ export async function createChatSession(opts: {
   id?: string;
   effort?: string;
   fast?: string;
+  context?: string;
+  thinking?: string;
   passThroughTools?: boolean;
 }): Promise<SessionRecord> {
   const record = await createAgentRecord({
@@ -124,6 +130,8 @@ export async function resolveChatSession(opts: {
     opts.headers.sessionId;
   const effort = opts.body.reasoning_effort;
   const fast = opts.body.fast;
+  const context = opts.body.context;
+  const thinking = opts.body.thinking;
   const toolOutputs = toolOutputsFromMessages(opts.body.messages);
   const passThrough = Boolean(opts.tools && opts.tools.length > 0);
 
@@ -189,6 +197,8 @@ export async function resolveChatSession(opts: {
         model: opts.model,
         effort,
         fast,
+        context,
+        thinking,
         passThroughTools: passThrough,
       }),
     );
@@ -243,6 +253,8 @@ export async function resolveChatSession(opts: {
           stored: true,
           effort,
           fast,
+          context,
+          thinking,
           passThroughTools: passThrough,
         }),
     );
@@ -258,6 +270,8 @@ export async function resolveChatSession(opts: {
     model: opts.model,
     effort,
     fast,
+    context,
+    thinking,
     passThroughTools: passThrough,
   });
   return { record, prompt: flattenMessages(opts.body.messages) };
@@ -298,6 +312,8 @@ export async function resolveResponseSession(opts: {
 }): Promise<ResolvedTurn> {
   const effort = opts.body.reasoning_effort ?? opts.body.reasoning?.effort;
   const fast = opts.body.fast;
+  const context = opts.body.context;
+  const thinking = opts.body.thinking;
   const outputs = extractFunctionCallOutputs(opts.body.input);
   const passThrough = Boolean(opts.tools && opts.tools.length > 0);
 
@@ -373,6 +389,8 @@ export async function resolveResponseSession(opts: {
     previousResponseId: null,
     effort,
     fast,
+    context,
+    thinking,
     passThroughTools: passThrough,
   });
   record.createdAt = opts.createdAt;

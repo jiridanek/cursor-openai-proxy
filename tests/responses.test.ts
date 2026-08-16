@@ -194,4 +194,50 @@ describe("POST /v1/responses", () => {
     });
     expect(already.status).toBe(409);
   });
+
+  it("maps context/thinking onto model.params when the catalog declares them", async () => {
+    const backend = new FakeCursorBackend();
+    backend.models = [
+      {
+        id: "claude-sonnet-5",
+        parameters: [
+          { id: "context", values: [{ value: "300k" }, { value: "1m" }] },
+          { id: "thinking", values: [{ value: "false" }, { value: "true" }] },
+        ],
+      },
+    ];
+    const { app } = makeApp(backend);
+
+    await postJson(app, "/v1/responses", {
+      model: "claude-sonnet-5",
+      input: "hi",
+      context: "1m",
+      thinking: "true",
+    });
+    expect(backend.createOptions[0]?.params).toEqual([
+      { id: "context", value: "1m" },
+      { id: "thinking", value: "true" },
+    ]);
+  });
+
+  it("ignores context/thinking values or params the catalog doesn't declare", async () => {
+    const backend = new FakeCursorBackend();
+    backend.models = [
+      {
+        id: "claude-sonnet-5",
+        parameters: [
+          { id: "context", values: [{ value: "300k" }, { value: "1m" }] },
+        ],
+      },
+    ];
+    const { app } = makeApp(backend);
+
+    await postJson(app, "/v1/responses", {
+      model: "claude-sonnet-5",
+      input: "hi",
+      context: "512k",
+      thinking: "true",
+    });
+    expect(backend.createOptions[0]?.params).toBeUndefined();
+  });
 });
