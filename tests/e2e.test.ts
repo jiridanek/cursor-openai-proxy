@@ -155,10 +155,14 @@ describe.skipIf(!live)(
     const created = (await first.json()) as {
       id: string;
       status: string;
-      output: Array<{ content: Array<{ text: string }> }>;
+      output: Array<{ type: string; content?: Array<{ text: string }> }>;
     };
     expect(created.status).toBe("completed");
-    expect(created.output[0]?.content[0]?.text).toMatch(/7/);
+    // A visible-reasoning turn unshifts a `type: "reasoning"` item ahead of
+    // the `message` item (see SPEC.md's "Reasoning summaries" section), so
+    // the message isn't reliably output[0] -- find it by type instead.
+    const createdMessage = created.output.find((item) => item.type === "message");
+    expect(createdMessage?.content?.[0]?.text).toMatch(/7/);
 
     const second = await post("/v1/responses", {
       input: "Why? One short sentence.",
@@ -168,11 +172,12 @@ describe.skipIf(!live)(
     const follow = (await second.json()) as {
       status: string;
       previous_response_id: string;
-      output: Array<{ content: Array<{ text: string }> }>;
+      output: Array<{ type: string; content?: Array<{ text: string }> }>;
     };
     expect(follow.status).toBe("completed");
     expect(follow.previous_response_id).toBe(created.id);
-    expect(follow.output[0]?.content[0]?.text.length).toBeGreaterThan(0);
+    const followMessage = follow.output.find((item) => item.type === "message");
+    expect(followMessage?.content?.[0]?.text.length).toBeGreaterThan(0);
   });
 
   it("parks a chat function tool and completes after the client result", async () => {
