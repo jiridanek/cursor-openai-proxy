@@ -1,10 +1,18 @@
 # Which catalog models actually work through the SDK (hosted auth)
 
-**Status:** observed via live probe against the running proxy, then root-caused
-with scratch scripts calling `@cursor/sdk` directly. The `composer-*`/`grok-*`
-"admin block" turned out to be a blocked `fast=true` param, not the models
-themselves — see "Follow-up" below for a concrete, actionable proxy fix. One
-unrelated anomaly also found (`gpt-5.4-nano`), not explained by admin policy.
+**Status:** resolved and implemented. Observed via live probe against the
+running proxy, then root-caused with scratch scripts calling `@cursor/sdk`
+directly. The `composer-*`/`grok-*` "admin block" turned out to be a blocked
+`fast=true` param, not the models themselves — fixed in `7391f45` (default
+`fast` to `"false"` for any model whose catalog exposes it, per "Follow-up"
+below). `claude-sonnet-5` turned out to expose `context`/`thinking` params
+this proxy never plumbed through at all — researched how OpenAI and Anthropic
+expose the same concepts natively, and how `goose` could actually send them,
+to arrive at a generalized fix, implemented in `129d951` (plain top-level
+`context`/`thinking` request fields, validated against the live catalog the
+same way `effort`/`fast` already are). One unrelated anomaly also found
+(`gpt-5.4-nano`), not explained by admin policy and not fixed here — see
+"Why this matters" below; it needs a report to Cursor, not a proxy change.
 
 ## Symptom
 
@@ -139,24 +147,186 @@ off), while this proxy never sets `fast` at all — `effortParams()`
 param when a client explicitly asks for one; nothing here ever touches
 `fast`, so every composer/grok call falls through to the blocked default.
 
-**Actionable fix, separate from the HTTP-status-mapping plan**: have the
-proxy default `fast` to `"false"` for any model whose catalog `parameters`
-include a `fast` entry, whenever the client hasn't specified one — mirroring
-how `effortParams()` already opts in to a param only when the catalog
-supports it. That alone would unblock `composer-2`, `composer-2.5`,
-`grok-4.5`, and `grok-4.6` under this account without waiting on any Cursor
-SDK change. Not implemented yet — this doc is the research; a follow-up plan
-should wire this into `src/mapping.ts` / wherever `params` gets built for
-`Agent.create()`, plus a way for a client to still explicitly opt into
-`fast=true` if they want it (and accept that it'll be blocked here).
+**Implemented in `7391f45`**: the proxy defaults `fast` to `"false"` for any
+model whose catalog `parameters` include a `fast` entry, whenever the client
+hasn't specified one (`fastParam()`, `src/mapping.ts`) — mirroring how
+`effortParams()` already opts in to a param only when the catalog supports
+it. This unblocks `composer-2`, `composer-2.5`, `grok-4.5`, and `grok-4.6`
+under this account without waiting on any Cursor SDK change, and — since the
+conditional is generic (any catalog entry exposing `fast`, not a hardcoded
+model list) — the same fix covers any other model with the same
+blocked-by-default `fast` behavior without needing to survey them first (see
+"Open questions" below). A client can still explicitly opt into `fast=true`
+if it wants to (and accept that it'll be blocked here).
+
+## Follow-up: `claude-sonnet-5` exposes `context` (300k/1m) and `thinking`, and this proxy can't set either
+
+Prompted by a report that the Cursor IDE UI offers a 300k/1m context-size
+choice for Sonnet 5 — which seemed to contradict this doc's original "no
+model exposes context window as a param" read. It didn't: that read was
+based only on inspecting `composer-*`/`grok-*`'s catalog parameters (`fast`,
+`effort`); `claude-sonnet-5` itself was never checked. Correcting it here.
+
+Querying `Cursor.models.list()` directly (same throwaway-key technique as
+above) for `claude-sonnet-5` shows **three** independent params, not one:
+
+```
+thinking: false | true
+context:  300k  | 1m
+effort:   low | medium | high | xhigh
+```
+
+The catalog's default variant (`isDefault: true`) is
+`thinking=true, context=1m, effort=high`. Unlike the `fast` case above, this
+one isn't blocked: probing all of `no-params`, `context=300k` (+
+`thinking=false`, `effort=medium`), the catalog-declared default explicitly,
+and `context=1m` alone — every combination returned `status=finished` with
+no error. So `context`/`thinking` are freely selectable on Cursor's side;
+this isn't an admin-policy question at all.
+
+**The actual gap is entirely on this proxy's side.** `effortParams()`
+(`src/mapping.ts:451-470`) only ever recognizes a catalog parameter literally
+named `effort` or `reasoning_effort`, and only ever reads it from the single
+OpenAI-standard `reasoning_effort` request field (`src/http/schemas.ts:37`,
+`:61-62`). It has no concept of `context` or `thinking` — nothing in this
+proxy reads, validates, or forwards them to `Agent.create()`, regardless of
+what a given model's catalog entry supports. A client (e.g. `goose`, or any
+other OpenAI-compatible chat client sitting in front of this proxy) has no
+way to pick 300k vs 1m context, or toggle extended thinking, for
+`claude-sonnet-5` today. Every call silently gets whatever Cursor's backend
+resolves as the no-params default — believed to be the catalog's `isDefault`
+variant here (unlike the `composer`/`grok` `fast` case, where no-params
+demonstrably did *not* match the catalog's stated default), but that belief
+isn't independently confirmed — there's no response field that reports back
+which variant actually served the request.
+
+**Two separate problems, since they needed different fixes:**
+1. Known-blocked param defaulted wrong (`fast` on `composer-*`/`grok-*`) —
+   fix was a smarter *default*, per the earlier section. Implemented in
+   `7391f45`.
+2. Missing plumbing entirely (`context`/`thinking` on `claude-sonnet-5`, and
+   possibly other params on other models not yet surveyed) — fix was a
+   *generalized* param-passthrough mechanism, since `effortParams()` was
+   hardcoded to one param name and one request field. Implemented in
+   `129d951` (`contextParam()`/`thinkingParam()`, same shape as
+   `effortParams()`/`fastParam()`).
+
+**Design question for a generalized fix — resolved below** by researching
+how the underlying model providers themselves expose these same knobs, and
+how `goose` (the target OpenAI-compatible client) can be made to send them.
+
+## Follow-up: how OpenAI and Anthropic expose the same knobs, and what that means for a fix
+
+Cursor's `model.params` bundles `effort`/`fast`/`thinking`/`context` into one
+array. The two underlying frontier-model APIs don't do it that way — useful
+context for designing a generalized version of `effortParams()`.
+
+**OpenAI (GPT-5 family, incl. the newest "Luna"/Sol/Terra tier split)**
+splits these into three independent, orthogonal request fields rather than
+one bundle:
+- `reasoning_effort` (Chat Completions, top-level string) / `reasoning.effort`
+  (Responses API, nested) — values from `none`/`minimal`/`low`/`medium`/`high`
+  up to `xhigh`/`max` depending on model, same shape as the OpenAI-standard
+  field this proxy already reads.
+- `verbosity` (Chat Completions, top-level) / `text.verbosity` (Responses,
+  nested) — `low`/`medium`/`high`, controls response length/detail, no Cursor
+  analogue seen so far.
+- `service_tier: "fast"` (both APIs) — a latency/priority knob, separate from
+  reasoning depth entirely. Notably **not** the same concept as Cursor's
+  `fast` param (which affects quality/model routing, not queue priority).
+- Context window: fixed per model id, no runtime toggle at all — OpenAI has
+  nothing resembling Cursor's `context: 300k/1m` choice.
+
+**Anthropic (Claude Sonnet 5 / Opus 5)** maps onto Cursor's shape almost
+exactly, closer than OpenAI does:
+- `output_config: {"effort": "low"|"medium"|"high"|"xhigh"|"max"}` — the
+  same 5-level scale as Cursor's `effort` param, verbatim.
+- `thinking: {"type": "adaptive"}` (or omitted) — boolean-ish on/off, matching
+  Cursor's `thinking` param. (The older raw `budget_tokens` mechanism is
+  fully removed / 400s on Opus 5 and Sonnet 5 — adaptive + `effort` replaced
+  it.)
+- 1M context is now just the **default** window on Sonnet 5/Opus 5 — no beta
+  header or param needed, no opt-in. This suggests Cursor's `context:
+  300k/1m` choice on `claude-sonnet-5` is Cursor's own product decision
+  (probably a cost/speed trade-off they expose), not a pass-through of an
+  Anthropic-side flag — Anthropic itself doesn't gate 1M behind a param here
+  anymore.
+- `speed: "fast"` exists as a distinct knob too, but is restricted to the
+  direct Claude API only (not Vertex/Bedrock) — an access-tier restriction
+  that structurally resembles Cursor's own blocked `fast=true` on
+  composer/grok (see above): a "fast" knob that exists in the API surface but
+  is gated off for some accounts/routes.
+- Vertex AI: same Messages API semantics for all of the above, just
+  different transport (`model` in the URL, `anthropic_version` in the body
+  instead of a header) — no functional difference for this comparison.
+
+**Net read:** Cursor's `effort`/`thinking` are basically Anthropic's own
+`output_config.effort`/`thinking` params relayed through, largely unmodified
+in shape. `fast` and `context` look more like Cursor-specific product
+decisions layered on top (matching neither provider's API 1:1), which is
+also consistent with `fast` being something Cursor's own admin policy
+chooses to block — it's not a provider-level restriction being relayed.
+
+## Follow-up: goose *can* send these — via config file, not the UI
+
+Researched goose's (`block/goose`) source and docs directly. The crux
+question — can a goose user get non-standard fields into the outgoing
+request body at all — is a **partial yes**:
+
+- Every model entry in a goose custom-provider config has a real
+  `request_params: Option<HashMap<String, serde_json::Value>>` field
+  (`crates/goose-provider-types/src/base.rs:267-291`) that gets merged
+  verbatim into the outgoing JSON body (`formats/openai.rs`, `create_request`)
+  — a genuine `extra_body` equivalent. Shipped proof it works: goose's
+  bundled Cerebras provider definition sets
+  `"request_params": {"reasoning_format": "parsed"}` per model
+  ([cerebras.json](https://github.com/block/goose/blob/main/crates/goose-providers/src/declarative/definitions/cerebras.json)).
+- **Not exposed in the CLI wizard or Desktop UI** — a goose user has to
+  hand-edit the custom provider's JSON config
+  (`~/.config/goose/custom_providers/*.json`) to set it. `goose configure`
+  only prompts for base URL / API key / model list / headers.
+- Goose's own model-name-suffix parsing (`gpt-5.4-high` → strips suffix, sets
+  `reasoning_effort`) is regex-gated to names matching `o\d+` or `gpt-5` —
+  it will **not** fire for a custom model id like `claude-sonnet-5` or
+  `composer-2`, so this proxy is free to invent its own model-id-suffix
+  convention (option (b) from the original design question) without
+  colliding with goose's built-in behavior, if that ends up being preferred
+  over `request_params`.
+
+**Recommendation for this proxy's design, given all three findings:** don't
+invent a model-id-suffix scheme — add plain top-level request fields
+(`fast`, `context`, `thinking`, mirroring the existing top-level
+`reasoning_effort` convention rather than nesting them), validated against
+each model's live catalog the same way `effortParams()` already validates
+`effort` (only apply a param the target model's catalog actually declares,
+silently ignore otherwise). **Followed as-is in `129d951`.** A goose user
+reaches these today by adding a `request_params` block to their custom
+provider's JSON config file — no goose code change needed, just
+documentation on this proxy's side (`SPEC.md`) of what fields it accepts.
+The UI gap is goose's, not something this proxy can paper over.
 
 ## Open questions
 
-- Is the `fast=true` admin block specific to this account/team, or a
-  Cursor-wide policy for these models? Can't tell from here — would need
-  comparing against an unrestricted account.
-- Do other models besides these four expose a `fast` param with the same
-  blocked-by-default behavior? Only `composer-*`/`grok-*` were checked here.
+- (Resolved) Is the `fast=true` admin block specific to this account/team,
+  or a Cursor-wide policy for these models? Confirmed: it's team policy.
+- (Resolved — doesn't matter) Do other models besides these four expose a
+  `fast` param with the same blocked-by-default behavior? Not worth
+  surveying: `fastParam()`'s conditional (`src/mapping.ts`) already applies
+  the `fast=false` default to *any* catalog entry that declares a `fast`
+  parameter, not a hardcoded model list, so any other model with the same
+  behavior is already covered by the implemented fix without needing to be
+  identified first.
 - Is `gpt-5.4-nano`'s default reasoning-effort resolution broken for every
   account, or specific to this one? Not reproducible from this proxy alone —
   would need testing directly against `@cursor/sdk` or Cursor's own tooling.
+- What does the no-params default actually resolve to for `claude-sonnet-5`
+  — the catalog's stated `isDefault` variant, or something else (as was the
+  case for `composer`/`grok`'s `fast`)? No response field surfaces this;
+  would need Cursor's own tooling/support to confirm.
+- Which other models expose `context`, `thinking`, or params not yet seen in
+  this survey (only `composer-*`/`grok-*`/`claude-sonnet-5` have been
+  inspected in detail)? A full sweep of `Cursor.models.list()`'s
+  `parameters` across all 56 catalog ids hasn't been done.
+- (Resolved — see "goose *can* send these" above) whether goose can send
+  arbitrary custom fields: yes, via a custom provider's `request_params`
+  config, not via any UI.
