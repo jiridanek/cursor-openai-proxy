@@ -548,16 +548,33 @@ function findCatalogParam(
   return model?.parameters?.find((item) => paramIds.includes(item.id));
 }
 
+// Shared shell for effortParams()/fastParam()/contextParam()/thinkingParam()
+// below: resolve the requested value (applying a default first, since
+// fastParam's default must be applied *before* the falsy check -- see its
+// comment), look up the matching catalog param, and validate the value is
+// one the catalog actually advertises for this model.
+function catalogParam(
+  catalog: ModelCatalogEntry[],
+  modelId: string,
+  paramIds: readonly string[],
+  requested: string | undefined,
+  opts?: { default?: string },
+): { id: string; value: string } | undefined {
+  const value = requested ?? opts?.default;
+  if (!value) return undefined;
+  const param = findCatalogParam(catalog, modelId, paramIds);
+  if (!param) return undefined;
+  if (!param.values.some((v) => v.value === value)) return undefined;
+  return { id: param.id, value };
+}
+
 export function effortParams(
   catalog: ModelCatalogEntry[],
   modelId: string,
   effort: string | undefined,
 ): Array<{ id: string; value: string }> | undefined {
-  if (!effort) return undefined;
-  const param = findCatalogParam(catalog, modelId, ["effort", "reasoning_effort"]);
-  if (!param) return undefined;
-  if (!param.values.some((value) => value.value === effort)) return undefined;
-  return [{ id: param.id, value: effort }];
+  const param = catalogParam(catalog, modelId, ["effort", "reasoning_effort"], effort);
+  return param ? [param] : undefined;
 }
 
 // Cursor's backend resolves an unset `fast` param to `true` for at least
@@ -572,11 +589,7 @@ export function fastParam(
   modelId: string,
   fast: string | undefined,
 ): { id: string; value: string } | undefined {
-  const param = findCatalogParam(catalog, modelId, ["fast"]);
-  if (!param) return undefined;
-  const value = fast ?? "false";
-  if (!param.values.some((v) => v.value === value)) return undefined;
-  return { id: "fast", value };
+  return catalogParam(catalog, modelId, ["fast"], fast, { default: "false" });
 }
 
 // Unlike `fast`, neither `context` nor `thinking` has a known backend-side
@@ -588,11 +601,7 @@ export function contextParam(
   modelId: string,
   context: string | undefined,
 ): { id: string; value: string } | undefined {
-  if (!context) return undefined;
-  const param = findCatalogParam(catalog, modelId, ["context"]);
-  if (!param) return undefined;
-  if (!param.values.some((value) => value.value === context)) return undefined;
-  return { id: param.id, value: context };
+  return catalogParam(catalog, modelId, ["context"], context);
 }
 
 export function thinkingParam(
@@ -600,11 +609,7 @@ export function thinkingParam(
   modelId: string,
   thinking: string | undefined,
 ): { id: string; value: string } | undefined {
-  if (!thinking) return undefined;
-  const param = findCatalogParam(catalog, modelId, ["thinking"]);
-  if (!param) return undefined;
-  if (!param.values.some((value) => value.value === thinking)) return undefined;
-  return { id: param.id, value: thinking };
+  return catalogParam(catalog, modelId, ["thinking"], thinking);
 }
 
 export function modelParams(
