@@ -201,7 +201,6 @@ function finishSupervisor(record: SessionRecord): void {
 async function collectTurn(
   record: SessionRecord,
   onEvent: RunListener | undefined,
-  resetText: boolean,
 ): Promise<TurnResult> {
   const supervisor = record.supervisor;
   if (!supervisor) {
@@ -209,12 +208,6 @@ async function collectTurn(
       type: "internal_error",
       code: "internal",
     });
-  }
-  if (resetText) {
-    record.outputText = "";
-    supervisor.outputText = "";
-    record.reasoningText = "";
-    supervisor.reasoningText = "";
   }
   supervisor.listener = onEvent;
   record.status = "in_progress";
@@ -335,7 +328,7 @@ export async function runSession(
     record.supervisor = supervisor;
     record.activeRun = run;
     attachRun(supervisor, run);
-    const result = await collectTurn(record, options.onEvent, false);
+    const result = await collectTurn(record, options.onEvent);
     if (result.status === "requires_action") {
       record.mutex.release();
       released = true;
@@ -385,7 +378,7 @@ export async function resumeParked(
       park.resolve(output.output);
       supervisor.parks.delete(output.callId);
     }
-    const result = await collectTurn(record, onEvent, false);
+    const result = await collectTurn(record, onEvent);
     if (result.status === "requires_action") {
       record.mutex.release();
       released = true;
