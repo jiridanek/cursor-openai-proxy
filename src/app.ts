@@ -114,24 +114,19 @@ function toolCallStreamer(): {
     kind: "text" | "tool_call";
     text?: string;
     callId?: string;
-    itemId?: string;
     name?: string;
     argumentsDelta?: string;
     index?: number;
   } | undefined;
 } {
-  const seen = new Map<string, { index: number; args: string; itemId: string }>();
+  const seen = new Map<string, { index: number; args: string }>();
   return {
     onEvent(event) {
       if (event.type === "text") return { kind: "text", text: event.text };
       let state = seen.get(event.callId);
       const isNew = !state;
       if (!state) {
-        state = {
-          index: seen.size,
-          args: "",
-          itemId: event.callId,
-        };
+        state = { index: seen.size, args: "" };
         seen.set(event.callId, state);
       }
       const prev = state.args;
@@ -146,7 +141,6 @@ function toolCallStreamer(): {
       return {
         kind: "tool_call",
         callId: event.callId,
-        itemId: state.itemId,
         name: isNew ? event.name : undefined,
         argumentsDelta,
         index: state.index,
