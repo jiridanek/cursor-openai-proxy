@@ -301,32 +301,26 @@ export function createApp(config: ProxyConfig, backend: CursorBackend) {
           return;
         }
         const includeUsage = body.stream_options?.include_usage === true;
-        if (result.status === "requires_action") {
-          await writeJsonSse(
-            stream,
-            chatFinishChunk(completionId, created, model, "tool_calls"),
+        const requiresAction = result.status === "requires_action";
+        if (!requiresAction) {
+          aliasPrefixSession(
+            config,
+            registry,
+            callerKeyHash,
+            body,
+            model,
+            record,
+            result.text,
           );
-          if (includeUsage) {
-            await writeJsonSse(
-              stream,
-              chatUsageChunk(completionId, created, model, toUsage(record.usage)),
-            );
-          }
-          await writeDone(stream);
-          return;
         }
-        aliasPrefixSession(
-          config,
-          registry,
-          callerKeyHash,
-          body,
-          model,
-          record,
-          result.text,
-        );
         await writeJsonSse(
           stream,
-          chatFinishChunk(completionId, created, model, "stop"),
+          chatFinishChunk(
+            completionId,
+            created,
+            model,
+            requiresAction ? "tool_calls" : "stop",
+          ),
         );
         if (includeUsage) {
           await writeJsonSse(
