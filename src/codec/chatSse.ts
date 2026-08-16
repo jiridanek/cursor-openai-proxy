@@ -100,10 +100,6 @@ export function chatFinishChunk(
   };
 }
 
-export function chatStopChunk(id: string, created: number, model: string): ChatChunk {
-  return chatFinishChunk(id, created, model, "stop");
-}
-
 export type ChatUsageChunk = {
   id: string;
   object: "chat.completion.chunk";
