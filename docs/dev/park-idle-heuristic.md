@@ -42,6 +42,38 @@ would add that same latency to the much more common single-call case. There
 is no way to have it both ways without an actual "turn done" signal from the
 SDK, which does not exist today.
 
+## Does this matter when streaming?
+
+Yes, but its role is narrower than in the non-streaming case, because
+streaming already decouples "deliver tool-call content" from "close the
+turn":
+
+- `wrapCustomTools().execute()` (`supervisor.ts:90-119`) calls
+  `supervisor.listener(...)` **synchronously the instant a call parks** —
+  completely independent of the idle timer. In `app.ts`'s stream handlers,
+  that listener writes the `chatToolCallChunk` / Responses function-call-
+  arguments SSE frame immediately. A streaming client sees each tool call as
+  soon as it's parked, with no `PARK_IDLE_MS` delay on that content.
+- `PARK_IDLE_MS` only gates when `collectTurn()` resolves, which is what lets
+  the handler proceed to write the terminal frame (`chatFinishChunk(...,
+  "tool_calls")` — just `delta: {}` plus `finish_reason`, no repeated content,
+  `codec/chatSse.ts:70-83`) and `[DONE]`. So the idle window still adds up to
+  `PARK_IDLE_MS` of tail latency after the last-seen park before the stream
+  is allowed to close — on every tool-calling turn, same as the non-streaming
+  case, just applied to when the connection ends rather than to the whole
+  response.
+- A call parking late enough to miss that window won't get a live delta on
+  that connection either — `supervisor.listener` is cleared at the same
+  moment `collectTurn()`'s idle branch fires (`supervisor.ts:241`) — but it's
+  still tracked via the persistent `onPark` re-sync (`:238-240`) and surfaces
+  on the client's next resume request, via the same non-fatal recovery path
+  `883f1e6` added (see below). Streaming doesn't change what happens to a
+  late park, only whether it happened to get a live delta before the cutoff.
+
+Net effect: streaming makes the heuristic's cost much smaller (a short fixed
+tail delay before stream closure, not a delay on all content delivery), not
+zero.
+
 ## Why a late park is no longer a correctness problem
 
 Before `883f1e6`, a tool call that parked more than `PARK_IDLE_MS` after the
