@@ -186,10 +186,21 @@ export class SdkCursorBackend implements CursorBackend {
       .then((models) => {
         const mapped: ModelListItem[] = models.map((model) => ({
           id: model.id,
+          displayName: model.displayName,
+          description: model.description,
           aliases: model.aliases,
           parameters: model.parameters?.map((parameter) => ({
             id: parameter.id,
             values: parameter.values.map((value) => ({ value: value.value })),
+          })),
+          variants: model.variants?.map((variant) => ({
+            params: variant.params.map((param) => ({
+              id: param.id,
+              value: param.value,
+            })),
+            displayName: variant.displayName,
+            description: variant.description,
+            isDefault: variant.isDefault,
           })),
         }));
         this.#pruneCatalog();

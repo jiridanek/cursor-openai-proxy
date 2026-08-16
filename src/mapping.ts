@@ -433,25 +433,30 @@ export type OpenAIModel = {
   owned_by: "cursor";
 };
 
-function dedupedCatalogIds(
-  catalog: Array<{ id: string; aliases?: string[] }>,
-): string[] {
+function dedupedCatalogEntries<T extends { id: string; aliases?: string[] }>(
+  catalog: T[],
+): Array<{ id: string; siblings: string[]; source: T }> {
   const seen = new Set<string>();
-  const ids: string[] = [];
+  const entries: Array<{ id: string; siblings: string[]; source: T }> = [];
   for (const model of catalog) {
-    for (const id of [model.id, ...(model.aliases ?? [])]) {
+    const names = [model.id, ...(model.aliases ?? [])];
+    for (const id of names) {
       if (seen.has(id)) continue;
       seen.add(id);
-      ids.push(id);
+      entries.push({
+        id,
+        siblings: names.filter((name) => name !== id),
+        source: model,
+      });
     }
   }
-  return ids;
+  return entries;
 }
 
 export function flattenCatalog(
   catalog: Array<{ id: string; aliases?: string[] }>,
 ): { object: "list"; data: OpenAIModel[] } {
-  const data = dedupedCatalogIds(catalog).map((id) => ({
+  const data = dedupedCatalogEntries(catalog).map(({ id }) => ({
     id,
     object: "model" as const,
     created: 0,
@@ -459,6 +464,20 @@ export function flattenCatalog(
   }));
   return { object: "list", data };
 }
+
+type ModelInfoCatalogEntry = {
+  id: string;
+  aliases?: string[];
+  displayName?: string;
+  description?: string;
+  parameters?: Array<{ id: string; values: Array<{ value: string }> }>;
+  variants?: Array<{
+    params: Array<{ id: string; value: string }>;
+    displayName: string;
+    description?: string;
+    isDefault?: boolean;
+  }>;
+};
 
 export type ModelInfoEntry = {
   model_name: string;
@@ -469,13 +488,18 @@ export type ModelInfoEntry = {
     key: string;
     litellm_provider: "cursor";
     mode: "chat";
+    display_name?: string;
+    description?: string;
+    aliases?: string[];
+    parameters?: ModelInfoCatalogEntry["parameters"];
+    variants?: ModelInfoCatalogEntry["variants"];
   };
 };
 
 export function flattenModelInfo(
-  catalog: Array<{ id: string; aliases?: string[] }>,
+  catalog: ModelInfoCatalogEntry[],
 ): { data: ModelInfoEntry[] } {
-  const data = dedupedCatalogIds(catalog).map((id) => ({
+  const data = dedupedCatalogEntries(catalog).map(({ id, siblings, source }) => ({
     model_name: id,
     litellm_params: { model: id },
     model_info: {
@@ -484,6 +508,11 @@ export function flattenModelInfo(
       key: id,
       litellm_provider: "cursor" as const,
       mode: "chat" as const,
+      ...(source.displayName ? { display_name: source.displayName } : {}),
+      ...(source.description ? { description: source.description } : {}),
+      ...(siblings.length > 0 ? { aliases: siblings } : {}),
+      ...(source.parameters ? { parameters: source.parameters } : {}),
+      ...(source.variants ? { variants: source.variants } : {}),
     },
   }));
   return { data };

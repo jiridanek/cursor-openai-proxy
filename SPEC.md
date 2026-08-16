@@ -177,6 +177,8 @@ Auth required. Same catalog flattening as `/v1/models`, shaped like LiteLLM's pr
 
 The Cursor SDK exposes no context-window, cost, or capability data per model, so `model_info` intentionally omits `max_tokens`/`max_input_tokens`/cost fields rather than fabricating them — only `id`/`db_model`/`key`/`litellm_provider`/`mode`, which LiteLLM's own schema treats as the guaranteed baseline.
 
+When the catalog entry has them, `model_info` also carries through, verbatim and undoctored, whatever `Cursor.models.list()` actually reports: `display_name`, `description`, `aliases` (the entry's *other* names — the flattened entry for `sonnet` lists `["claude-sonnet-5", "sonnet-5"]`, not itself), `parameters` (named knobs like `effort`/`fast`/`context`/`thinking`, each with its valid `values`), and `variants` (named parameter presets, each with its own `displayName`/`description`/`isDefault`). All five are omitted entirely (not sent as `null`) for a catalog entry that doesn't have them. None of this is LiteLLM's own schema — it's this proxy's own honest extension of `model_info`'s free-form shape, added because the data exists and is real, not because LiteLLM expects these specific keys.
+
 ### `POST /v1/embeddings`
 
 **501** Embeddings.

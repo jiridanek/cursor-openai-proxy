@@ -77,6 +77,63 @@ describe("GET /v1/model/info", () => {
     const res = await app.request("/v1/model/info");
     expect(res.status).toBe(401);
   });
+
+  it("surfaces displayName/description/parameters/variants when the catalog has them", async () => {
+    const backend = new FakeCursorBackend();
+    backend.models = [
+      {
+        id: "claude-sonnet-5",
+        displayName: "Claude Sonnet 5",
+        description: "Anthropic's Sonnet 5 model.",
+        aliases: ["sonnet", "sonnet-5"],
+        parameters: [
+          { id: "effort", values: [{ value: "low" }, { value: "high" }] },
+        ],
+        variants: [
+          {
+            params: [{ id: "effort", value: "high" }],
+            displayName: "High effort",
+            isDefault: true,
+          },
+        ],
+      },
+    ];
+    const { app } = makeApp(backend);
+
+    const res = await app.request("/v1/model/info", { headers: authHeaders() });
+    expect(res.status).toBe(200);
+    const body = await jsonOf<{
+      data: Array<{
+        model_name: string;
+        model_info: {
+          display_name?: string;
+          description?: string;
+          aliases?: string[];
+          parameters?: unknown;
+          variants?: unknown;
+        };
+      }>;
+    }>(res);
+
+    const primary = body.data.find((row) => row.model_name === "claude-sonnet-5");
+    expect(primary?.model_info.display_name).toBe("Claude Sonnet 5");
+    expect(primary?.model_info.description).toBe("Anthropic's Sonnet 5 model.");
+    expect(primary?.model_info.aliases).toEqual(["sonnet", "sonnet-5"]);
+    expect(primary?.model_info.parameters).toEqual([
+      { id: "effort", values: [{ value: "low" }, { value: "high" }] },
+    ]);
+    expect(primary?.model_info.variants).toEqual([
+      {
+        params: [{ id: "effort", value: "high" }],
+        displayName: "High effort",
+        isDefault: true,
+      },
+    ]);
+
+    // An alias entry reports the *other* names, not itself.
+    const alias = body.data.find((row) => row.model_name === "sonnet");
+    expect(alias?.model_info.aliases).toEqual(["claude-sonnet-5", "sonnet-5"]);
+  });
 });
 
 describe("unsupported routes", () => {

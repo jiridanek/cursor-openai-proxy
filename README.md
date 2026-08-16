@@ -95,7 +95,7 @@ Chat tool follow-ups resolve by the `tool_call_id` the client already echoes bac
 |---|---|
 | `GET /v1/models` | Cursor catalog ids **and** aliases |
 | `GET /v1/models/{id}` | Same lookup; 404 if unknown |
-| `GET /v1/model/info` | LiteLLM-shaped per-model info (id/provider/mode only; no cost or token-limit data) |
+| `GET /v1/model/info` | LiteLLM-shaped per-model info: id/provider/mode always; display name, description, aliases, params, and variants when the catalog has them; never cost or token-limit data |
 | `POST /v1/chat/completions` | Chat Completions wire; each call is an agent turn; sticky session via header / body; function tools park as `tool_calls` |
 | `POST /v1/responses` | Native session handle via `previous_response_id`; function tools park as `requires_action` |
 | `GET /v1/responses/{response_id}` | Stored response object |

@@ -47,6 +47,58 @@ describe("SdkCursorBackend model catalog cache", () => {
   });
 });
 
+describe("SdkCursorBackend model catalog mapping", () => {
+  it("keeps displayName, description, and variants instead of dropping them", async () => {
+    // The cache used to narrow each SDK model down to {id, aliases,
+    // parameters} only, silently dropping displayName/description/variants
+    // even though Cursor.models.list() returns them -- so no endpoint could
+    // ever surface this data, regardless of what the HTTP layer wanted to do
+    // with it.
+    vi.mocked(Cursor.models.list).mockResolvedValueOnce([
+      {
+        id: "claude-sonnet-5",
+        displayName: "Claude Sonnet 5",
+        description: "Anthropic's Sonnet 5 model.",
+        aliases: ["sonnet", "sonnet-5"],
+        parameters: [
+          { id: "effort", values: [{ value: "low" }, { value: "high" }] },
+        ],
+        variants: [
+          {
+            params: [{ id: "effort", value: "high" }],
+            displayName: "High effort",
+            description: "More thorough reasoning.",
+            isDefault: true,
+          },
+        ],
+      },
+    ]);
+    const backend = new SdkCursorBackend();
+
+    const models = await backend.listModels("key");
+
+    expect(models).toEqual([
+      {
+        id: "claude-sonnet-5",
+        displayName: "Claude Sonnet 5",
+        description: "Anthropic's Sonnet 5 model.",
+        aliases: ["sonnet", "sonnet-5"],
+        parameters: [
+          { id: "effort", values: [{ value: "low" }, { value: "high" }] },
+        ],
+        variants: [
+          {
+            params: [{ id: "effort", value: "high" }],
+            displayName: "High effort",
+            description: "More thorough reasoning.",
+            isDefault: true,
+          },
+        ],
+      },
+    ]);
+  });
+});
+
 describe("SdkCursorBackend SDK error mapping", () => {
   it("maps a thrown ConfigurationError to a 400 invalid_request_error", async () => {
     vi.mocked(Agent.create).mockRejectedValueOnce(

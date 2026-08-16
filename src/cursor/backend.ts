@@ -1,12 +1,22 @@
 import type { AgentMode } from "../config.ts";
 
+export type ModelVariant = {
+  params: Array<{ id: string; value: string }>;
+  displayName: string;
+  description?: string;
+  isDefault?: boolean;
+};
+
 export type ModelListItem = {
   id: string;
+  displayName?: string;
+  description?: string;
   aliases?: string[];
   parameters?: Array<{
     id: string;
     values: Array<{ value: string }>;
   }>;
+  variants?: ModelVariant[];
 };
 
 export type TokenUsage = {
