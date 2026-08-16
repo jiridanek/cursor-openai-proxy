@@ -21,43 +21,32 @@ import type {
   StreamEvent,
 } from "./backend.ts";
 
-// The Cursor SDK throws typed errors for problems it can classify up front
-// (bad model id, bad API key, rate limits, ...) synchronously out of
-// `Agent.create()`/`agent.send()`. Its own error classes already carry the
-// intended HTTP status semantics (see @cursor/sdk's errors.d.ts doc
-// comments), but the instances themselves don't reliably set `.status` --
-// map by class instead of trusting the field.
+// The Cursor SDK's error classes are all direct siblings under
+// CursorSdkError (none subclasses another), so instanceof-check order
+// doesn't matter here -- a table lookup is behaviorally identical to an
+// if-chain. Each class's intended HTTP status/type is per @cursor/sdk's own
+// errors.d.ts doc comments; the instances themselves don't reliably set
+// `.status`, so map by class instead of trusting the field.
+const SDK_ERROR_STATUS_MAP: ReadonlyArray<
+  [
+    new (...args: never[]) => CursorSdkError,
+    number,
+    "invalid_request_error" | "internal_error",
+  ]
+> = [
+  [AuthenticationError, 401, "invalid_request_error"],
+  [RateLimitError, 429, "invalid_request_error"],
+  [ConfigurationError, 400, "invalid_request_error"],
+  [AgentBusyError, 409, "invalid_request_error"],
+  [NetworkError, 503, "internal_error"],
+];
+
 function mapSdkError(err: unknown): HttpError | undefined {
   if (!(err instanceof CursorSdkError)) return undefined;
-  if (err instanceof AuthenticationError) {
-    return new HttpError(401, err.message, {
-      type: "invalid_request_error",
-      code: err.code ?? null,
-    });
-  }
-  if (err instanceof RateLimitError) {
-    return new HttpError(429, err.message, {
-      type: "invalid_request_error",
-      code: err.code ?? null,
-    });
-  }
-  if (err instanceof ConfigurationError) {
-    return new HttpError(400, err.message, {
-      type: "invalid_request_error",
-      code: err.code ?? null,
-    });
-  }
-  if (err instanceof AgentBusyError) {
-    return new HttpError(409, err.message, {
-      type: "invalid_request_error",
-      code: err.code ?? null,
-    });
-  }
-  if (err instanceof NetworkError) {
-    return new HttpError(503, err.message, {
-      type: "internal_error",
-      code: err.code ?? null,
-    });
+  for (const [ErrorClass, status, type] of SDK_ERROR_STATUS_MAP) {
+    if (err instanceof ErrorClass) {
+      return new HttpError(status, err.message, { type, code: err.code ?? null });
+    }
   }
   return new HttpError(500, err.message, {
     type: "internal_error",
