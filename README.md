@@ -134,3 +134,12 @@ LIVE_SMOKE=1 CURSOR_API_KEY=crsr_... npm test -- tests/e2e.test.ts
 ```bash
 LIVE_SMOKE=1 E2E_SPAWN=1 CURSOR_API_KEY=crsr_... npm test -- tests/e2e.test.ts
 ```
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in this project shall be dual licensed as above,
+without any additional terms or conditions.

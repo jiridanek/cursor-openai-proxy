@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "description": "OpenAI Chat Completions + stateful Responses proxy over the Cursor SDK.",
+  "license": "(MIT OR Apache-2.0)",
   "engines": {
     "node": ">=22.13.0"
   },
