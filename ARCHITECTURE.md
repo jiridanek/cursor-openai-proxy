@@ -39,8 +39,9 @@ on session state or the SDK.
 ## Why an in-memory `SessionRegistry`, not a store
 
 This is a single-process local agent gateway (`README.md`'s "Is / Is not"):
-one proxy process, one workspace, agents that must stay in the loop for ToS
-reasons. There's no multi-process or multi-host deployment target that would
+one proxy process, each agent in its own isolated temp directory, agents that
+must stay in the loop for ToS reasons. There's no multi-process or
+multi-host deployment target that would
 need shared, persisted session state, so `SessionRegistry` is a plain
 in-memory map. If that deployment shape ever changes (e.g. running multiple
 proxy replicas behind a load balancer), this is the component that would
@@ -119,6 +120,30 @@ shell/edit) when the request has no client `tools`. This isn't an
 inconsistency with the minimize-agent goal — it's an explicit opt-in for
 operators who want a more capable local agent, layered on top of the same
 mechanism rather than replacing it.
+
+## Every agent runs in an isolated temp directory
+
+This section is about *which tools* are offered; this is about *what those
+tools can reach*, and it used to be a real gap. Earlier, every agent's
+`local.cwd` was an operator-configured `--workspace` (defaulting to
+`process.cwd()`) — meaning `ask` mode's default read-only allowlist, and
+`plan`/`agent` mode's `shell`/`edit`, all operated against wherever the
+operator happened to launch the proxy from. A client that sent zero `tools`
+could still have the agent read (or, in `plan`/`agent` mode, edit) real host
+files, with nothing in the OpenAI request itself indicating that was
+happening. Treating isolation as an opt-in flag was the wrong shape for that
+risk: it made "safe by default" someone's choice to remember, rather than
+the only way the proxy runs.
+
+Now every agent gets its own freshly created, empty temp directory as
+`cwd` (`SdkCursorBackend.createAgent()`), removed when the agent closes, and
+the process's `HOME`/`USERPROFILE`/`CURSOR_CONFIG_DIR` are scrubbed once at
+startup so nothing loads the operator's real Cursor config either. There is
+no `--workspace` flag anymore — an operator-configurable real workspace and
+"agents are isolated by default" are mutually exclusive goals, and this
+proxy chose the latter unconditionally. See `SPEC.md` §2 for the exact
+mechanism, including a documented (not yet implemented) future direction
+toward real OS-level sandboxing.
 
 ## Effect Schema only on the inbound side
 

@@ -31,7 +31,7 @@ LIVE_SMOKE=1 CURSOR_API_KEY=crsr_... npm test -- tests/e2e.test.ts
 
 Starts the real CLI as a child:
 
-`tsx src/index.ts --port 0 --host 127.0.0.1 --workspace <tmpdir>`
+`tsx src/index.ts --port 0 --host 127.0.0.1`
 
 `--port 0` is an OS-assigned port. The test reads `listening on http://127.0.0.1:<port>` from stdout, then `fetch`es that base URL. The child is SIGTERM'd in `afterAll`.
 

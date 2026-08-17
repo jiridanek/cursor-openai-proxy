@@ -8,7 +8,6 @@ export const HOSTED_KEY = "crsr_test_hosted_key";
 const DEFAULTS = {
   host: "127.0.0.1",
   port: 0,
-  workspace: "/tmp/workspace",
   sessionMode: "sticky",
   agentMode: "ask",
 } as const;

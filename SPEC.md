@@ -50,7 +50,6 @@ CLI:
 |---|---|---|
 | `--port` | `11434` | Listen port (`0` = OS-assigned) |
 | `--host` | `127.0.0.1` | Bind address |
-| `--workspace` | process cwd | Local agent working directory |
 | `--cursor-api-key` | `$CURSOR_API_KEY` | Hosted Cursor key; omit (and unset env) for passthrough |
 | `--session-mode` | `sticky` | Chat session resolution: `sticky` \| `prefix` |
 | `--agent-mode` | `ask` | `ask` \| `plan` \| `agent` |
@@ -61,7 +60,11 @@ CLI:
 
 The SDK `mode` field is only `"agent" | "plan"`. Local runs stay **YOLO**: do **not** set `local.autoReview` and do **not** enable sandbox. Offered tools run without a human prompt. The proxy caller decides what may run by sending OpenAI `tools` and choosing `--agent-mode`.
 
-Always `local: { cwd: --workspace, settingSources: [] }`. Never pass `mcpServers`. Never `agent.reload()` to pick up on-disk MCP. User/project/plugin Cursor MCP must not appear.
+**Every agent is isolated, unconditionally — not an opt-in flag.** `local.cwd` is never the operator's real cwd or an operator-configured path; there is no `--workspace` flag. `SdkCursorBackend.createAgent()` creates a fresh, empty temp directory per agent (`mkdtempSync`) and always uses `local: { cwd: <that temp dir>, settingSources: [] }`. The directory is removed when the agent's handle is `close()`d (and immediately if `Agent.create()` itself fails); for a stored session that's kept alive across many turns, its temp dir persists for as long as the session does, same as every other in-memory session artifact — see §4's "no persistence" note. In addition, this process's `HOME` / `USERPROFILE` / `CURSOR_CONFIG_DIR` are overridden once at process startup (`SdkCursorBackend`'s constructor, guarded to run once regardless of how many instances exist) to a separate dedicated temp directory, so nothing can load the operator's real Cursor config or credentials via those either. This applies identically to every `--agent-mode`: `ask`'s read-only allowlist and `plan`/`agent`'s `shell`/`edit` all only ever see this throwaway directory. Never pass `mcpServers`. Never `agent.reload()` to pick up on-disk MCP. User/project/plugin Cursor MCP must not appear.
+
+#### Future direction: real sandboxing
+
+Not implemented. The isolation above (per-agent temp `cwd` + scrubbed `HOME`/`CURSOR_CONFIG_DIR`) constrains what an agent's *tools* can reach by controlling what's *there* to reach — it is not OS-level containment. A stronger future step would treat the Cursor SDK's local execution as an untrusted component (or, since it's probably no harder, sandbox the whole proxy process) using real OS primitives: Landlock or user namespaces on Linux; `sandbox-exec`'s S-expression profile language on macOS (there is no real alternative there). Worth checking first: `@cursor/sdk`'s `LocalAgentOptions` already exposes an undocumented `sandboxOptions?: { enabled: boolean }` (see the SDK's `options.d.ts`) with no further detail on what it actually restricts — investigate what that flag does before or instead of rolling independent OS-level sandboxing. This is a separate concern from the tool-allowlist mechanism above (§1's existing non-goal "don't use `local.autoReview`/sandbox as the way to strip `shell`/`edit` — the allowlist does that" still holds): that non-goal is about tool *selection*; this future direction is about filesystem/process containment as defense-in-depth regardless of which tools are offered.
 
 | Situation | SDK `mode` | `tools` on create |
 |---|---|---|
@@ -278,7 +281,7 @@ Otherwise (a plain-text turn), resolve id in order: `cursor_session_id` → `ses
 
 **`prefix`**
 
-- If `messages[:-1]` is non-empty, lookup `sess_` + first 24 hex chars of SHA-256(`JSON.stringify({ prefix: messages[:-1], model, workspace })`). Hit → reuse; `send()` last user text.
+- If `messages[:-1]` is non-empty, lookup `sess_` + first 24 hex chars of SHA-256(`JSON.stringify({ prefix: messages[:-1], model })`). Hit → reuse; `send()` last user text.
 - Miss or empty prefix → new agent; `send()` flattened full `messages`.
 - After the run, alias the same agent under the hash of `messages + assistant reply`, so the next client request’s `messages[:-1]` matches.
 - Non-empty `tools` → **400** (tool loop needs sticky ids).
@@ -387,4 +390,4 @@ client = OpenAI(base_url="http://127.0.0.1:11434/v1", api_key="ollama")  # hoste
 - Chat Completions: compatibility layer. Set `extra_body={"session_id": …}` or read `X-Cursor-Session-Id` from the first response to continue a sticky session. Tool follow-ups **must** send that id (same live `Run`).
 - Responses: pass `previous_response_id` from the prior `id`. That is the native session handle. Submit tool results as `function_call_output` items on the next create.
 
-Default `ask` can read `--workspace` with the narrow allowlist. Client `tools` replace those built-ins. `plan` / `agent` can edit the tree; that widens the agent and is opt-in.
+Default `ask` can read its isolated per-agent temp directory (§2) with the narrow allowlist — never the operator's real filesystem. Client `tools` replace those built-ins. `plan` / `agent` can edit that same isolated tree; that widens the agent and is opt-in, but stays confined to the throwaway directory.

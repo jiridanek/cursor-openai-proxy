@@ -72,7 +72,6 @@ export type AgentHandle = {
 export type CreateAgentOptions = {
   apiKey: string;
   model: string;
-  workspace: string;
   mode: AgentMode;
   params?: Array<{ id: string; value: string }>;
   tools?: string[];

@@ -83,7 +83,7 @@ CURSOR_API_KEY=<key> npm start -- --port 11434   # hosted auth (real Cursor acco
 ```
 
 Blocks in the foreground; `Ctrl-C` to stop. `--help` lists all flags
-(`--session-mode sticky|prefix`, `--agent-mode ask|plan|agent`, `--workspace`).
+(`--session-mode sticky|prefix`, `--agent-mode ask|plan|agent`).
 
 ## Gotchas
 

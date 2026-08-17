@@ -33,10 +33,10 @@ Every request must send `Authorization: Bearer …` (the OpenAI `api_key`). That
 
 ```bash
 # Hosted-key (dummy api_key on the OpenAI client)
-CURSOR_API_KEY=crsr_... npx tsx src/index.ts --port 11434 --workspace .
+CURSOR_API_KEY=crsr_... npx tsx src/index.ts --port 11434
 
 # Passthrough (client sends the real Cursor key)
-npx tsx src/index.ts --port 11434 --workspace .
+npx tsx src/index.ts --port 11434
 ```
 
 ```python
@@ -76,6 +76,8 @@ The proxy caller decides what may run. Do not “turn on safety” by adding `au
 
 Ambient Cursor MCP (`~/.cursor/mcp.json`, project `.cursor/mcp.json`, plugins) is never loaded: every agent uses `settingSources: []` and no `mcpServers`. Only tools supplied on the HTTP request are available.
 
+**Every agent runs isolated, unconditionally — not an opt-in flag.** The allowlist above controls *which* tools are offered; isolation controls *what they can reach*. Every agent gets its own freshly created, empty temporary directory as `cwd` — never the operator's real project, never a configurable `--workspace`. On top of that, this process's `HOME` / `USERPROFILE` / `CURSOR_CONFIG_DIR` are overridden once at startup to another isolated directory, so nothing can load the operator's real Cursor config either. This applies to `ask` mode's read-only tools just as much as `plan`/`agent` mode's `shell`/`edit` — there is no mode or flag that points an agent at a real, meaningful filesystem. See [SPEC.md](SPEC.md) for the exact mechanism and a documented future direction (real OS-level sandboxing).
+
 Chat tool follow-ups resolve by the `tool_call_id` the client already echoes back — no proxy-specific session id needed; that's what lets a plain OpenAI-compatible client complete a tool-calling round with zero awareness of this proxy's extensions. Creating a *new* tool-using conversation still needs **sticky** mode, since prefix mode rejects `tools` (an agent's tool permissions are fixed at creation time). Responses tool loops use `previous_response_id` plus `function_call_output` items; `store: false` cannot be combined with tools. Answering only some of the currently pending tool calls is fine — the response reports whatever's still outstanding instead of erroring. Full resolution order: [SPEC.md](SPEC.md).
 
 ### CLI flags
@@ -84,7 +86,6 @@ Chat tool follow-ups resolve by the `tool_call_id` the client already echoes bac
 |---|---|---|
 | `--port` | `11434` | Listen port (`0` = OS-assigned) |
 | `--host` | `127.0.0.1` | Bind address |
-| `--workspace` | cwd | Local agent `cwd` |
 | `--cursor-api-key` | `$CURSOR_API_KEY` | Hosted Cursor key; omit for passthrough |
 | `--session-mode` | `sticky` | Chat Completions sessions: `sticky` or `prefix` |
 | `--agent-mode` | `ask` | Cursor conversation mode: `ask` (narrow read-only allowlist), `plan`, or `agent` |
@@ -110,7 +111,7 @@ Reasoning-model summaries (Cursor's own condensed reasoning text, not a raw trac
 
 `--session-mode sticky` (default): a tool-result follow-up (trailing `role: "tool"` message(s)) resolves by `tool_call_id` alone — no session id involved at all. Otherwise (plain-text turns): reuse `extra_body.session_id` / `cursor_session_id` or headers `X-Cursor-Session-Id` / `X-Session-Id`. If absent, create an agent and return the id in `X-Cursor-Session-Id`. Follow-ups `send()` only the latest user turn.
 
-`--session-mode prefix`: hash `messages[:-1]` + model + workspace. Same prefix reuses the agent; a history change starts a new one. Cannot be combined with OpenAI `tools`.
+`--session-mode prefix`: hash `messages[:-1]` + model. Same prefix reuses the agent; a history change starts a new one. Cannot be combined with OpenAI `tools`.
 
 ### Responses
 

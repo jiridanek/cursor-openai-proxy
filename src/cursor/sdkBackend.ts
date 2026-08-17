@@ -1,3 +1,6 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   Agent,
   AgentBusyError,
@@ -138,7 +141,7 @@ function wrapRun(run: SdkRun): RunHandle {
   };
 }
 
-function wrapAgent(agent: SdkAgent): AgentHandle {
+function wrapAgent(agent: SdkAgent, tempDir: string): AgentHandle {
   return {
     agentId: agent.agentId,
     async send(prompt, options) {
@@ -155,6 +158,7 @@ function wrapAgent(agent: SdkAgent): AgentHandle {
     },
     async close() {
       await agent[Symbol.asyncDispose]();
+      rmSync(tempDir, { recursive: true, force: true });
     },
   };
 }
@@ -165,9 +169,31 @@ const CATALOG_TTL_MS = 60_000;
 // grow #catalog forever. This bounds worst-case memory use.
 const MAX_CATALOG_ENTRIES = 1_000;
 
+// Every local agent this proxy creates must be isolated from the operator's
+// real machine, unconditionally -- not an opt-in flag. Two layers:
+// (1) each agent gets its own fresh, empty cwd (see createAgent()); (2) the
+// host environment is scrubbed once per process so the SDK/CLI can't fall
+// back to the operator's real home directory or Cursor config even if some
+// code path reads it directly instead of going through `local.cwd`. This
+// runs once regardless of how many SdkCursorBackend instances get
+// constructed (tests may construct more than one).
+let hostEnvScrubbed = false;
+function scrubHostEnv(): void {
+  if (hostEnvScrubbed) return;
+  hostEnvScrubbed = true;
+  const isolatedHome = mkdtempSync(join(tmpdir(), "cursor-proxy-home-"));
+  process.env.HOME = isolatedHome;
+  process.env.USERPROFILE = isolatedHome;
+  process.env.CURSOR_CONFIG_DIR = isolatedHome;
+}
+
 export class SdkCursorBackend implements CursorBackend {
   #catalog = new Map<string, { expires: number; models: ModelListItem[] }>();
   #inflight = new Map<string, Promise<ModelListItem[]>>();
+
+  constructor() {
+    scrubHostEnv();
+  }
 
   async listModels(apiKey: string): Promise<ModelListItem[]> {
     const cached = this.#catalog.get(apiKey);
@@ -228,6 +254,12 @@ export class SdkCursorBackend implements CursorBackend {
   }
 
   async createAgent(options: CreateAgentOptions): Promise<AgentHandle> {
+    // A fresh, empty temp dir per agent -- never the operator's real cwd or
+    // an operator-configured workspace. This is what actually contains
+    // ask-mode's read/grep/glob/ls and plan/agent-mode's shell/edit: those
+    // tools can only ever see this throwaway directory. Removed in
+    // wrapAgent()'s close().
+    const tempDir = mkdtempSync(join(tmpdir(), "cursor-agent-"));
     try {
       const agent = await Agent.create({
         apiKey: options.apiKey,
@@ -237,10 +269,11 @@ export class SdkCursorBackend implements CursorBackend {
         },
         mode: options.mode === "ask" ? undefined : options.mode,
         tools: options.tools,
-        local: { cwd: options.workspace, settingSources: [] },
+        local: { cwd: tempDir, settingSources: [] },
       });
-      return wrapAgent(agent);
+      return wrapAgent(agent, tempDir);
     } catch (err) {
+      rmSync(tempDir, { recursive: true, force: true });
       throw mapSdkError(err) ?? err;
     }
   }

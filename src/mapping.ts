@@ -277,13 +277,9 @@ export function flattenResponsesInput(
   return parts.join("\n");
 }
 
-function hashPrefix(
-  prefix: unknown,
-  model: string,
-  workspace: string,
-): string {
+function hashPrefix(prefix: unknown, model: string): string {
   const digest = createHash("sha256")
-    .update(JSON.stringify({ prefix, model, workspace }))
+    .update(JSON.stringify({ prefix, model }))
     .digest("hex")
     .slice(0, 24);
   return `sess_${digest}`;
@@ -292,21 +288,18 @@ function hashPrefix(
 export function prefixSessionId(
   messages: readonly ChatMessage[],
   model: string,
-  workspace: string,
 ): string {
-  return hashPrefix(messages.slice(0, -1), model, workspace);
+  return hashPrefix(messages.slice(0, -1), model);
 }
 
 export function nextPrefixSessionId(
   messages: readonly ChatMessage[],
   assistantText: string,
   model: string,
-  workspace: string,
 ): string {
   return hashPrefix(
     [...messages, { role: "assistant", content: assistantText }],
     model,
-    workspace,
   );
 }
 

@@ -62,7 +62,6 @@ async function createAgentRecord(opts: {
   const agent = await opts.backend.createAgent({
     apiKey: opts.apiKey,
     model: opts.model,
-    workspace: opts.config.workspace,
     mode: opts.config.agentMode,
     params: modelParams(catalog, opts.model, {
       effort: opts.effort,
@@ -215,11 +214,7 @@ export async function resolveChatSession(opts: {
   const lookupId =
     opts.config.sessionMode === "prefix"
       ? opts.body.messages.length > 1
-        ? prefixSessionId(
-            opts.body.messages,
-            opts.model,
-            opts.config.workspace,
-          )
+        ? prefixSessionId(opts.body.messages, opts.model)
         : undefined
       : stickyId;
 
@@ -288,12 +283,7 @@ export function aliasPrefixSession(
   text: string,
 ): void {
   if (config.sessionMode !== "prefix") return;
-  const nextId = nextPrefixSessionId(
-    body.messages,
-    text,
-    model,
-    config.workspace,
-  );
+  const nextId = nextPrefixSessionId(body.messages, text, model);
   registry.alias(callerKeyHash, nextId, record);
 }
 

@@ -1,6 +1,4 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { serve } from "@hono/node-server";
@@ -38,27 +36,19 @@ describe.skipIf(!live)(
   `e2e HTTP proxy (${spawnCli ? "spawned" : "in-process"})`,
   { timeout: 120_000 },
   () => {
-  let workspace: string;
   let base = "";
   let server: ServerType | undefined;
   let child: ChildProcess | undefined;
 
   beforeAll(async () => {
-    // Created here, not at describe-body scope: `describe.skipIf` still
-    // runs this callback body during Vitest's collection phase even when
-    // the suite ends up skipped, so a call here would leak a tmp dir on
-    // every `npm test` run regardless of LIVE_SMOKE. beforeAll only runs
-    // when the suite's tests actually execute.
-    workspace = mkdtempSync(join(tmpdir(), "cursor-proxy-e2e-"));
     if (spawnCli) {
-      const started = await startSpawnedProxy(workspace);
+      const started = await startSpawnedProxy();
       child = started.child;
       base = started.base;
       return;
     }
     const { app } = createApp(
       hostedConfig({
-        workspace,
         auth: {
           mode: "hosted",
           cursorApiKey: process.env.CURSOR_API_KEY!,
@@ -90,7 +80,6 @@ describe.skipIf(!live)(
         server.close((err) => (err ? reject(err) : resolve()));
       });
     }
-    rmSync(workspace, { recursive: true, force: true });
   });
 
   async function get(path: string, auth = true): Promise<Response> {
@@ -243,35 +232,22 @@ describe.skipIf(!live)(
 
 describe("e2e spawned CLI", { timeout: 20_000 }, () => {
   it("listens on an ephemeral port and serves /health", async () => {
-    const workspace = mkdtempSync(join(tmpdir(), "cursor-proxy-spawn-"));
-    const started = await startSpawnedProxy(workspace);
+    const started = await startSpawnedProxy();
     try {
       const res = await fetch(`${started.base}/health`);
       expect(res.status).toBe(200);
       expect(await res.json()).toMatchObject({ status: "ok" });
     } finally {
       await stopChild(started.child);
-      rmSync(workspace, { recursive: true, force: true });
     }
   });
 });
 
-function startSpawnedProxy(
-  workspace: string,
-): Promise<{ child: ChildProcess; base: string }> {
+function startSpawnedProxy(): Promise<{ child: ChildProcess; base: string }> {
   const tsxCli = join(ROOT, "node_modules/tsx/dist/cli.mjs");
   const child = spawn(
     process.execPath,
-    [
-      tsxCli,
-      "src/index.ts",
-      "--port",
-      "0",
-      "--host",
-      "127.0.0.1",
-      "--workspace",
-      workspace,
-    ],
+    [tsxCli, "src/index.ts", "--port", "0", "--host", "127.0.0.1"],
     {
       cwd: ROOT,
       env: process.env,

@@ -8,7 +8,6 @@ export type AuthConfig =
 export type ProxyConfig = {
   host: string;
   port: number;
-  workspace: string;
   sessionMode: SessionMode;
   agentMode: AgentMode;
   auth: AuthConfig;
@@ -17,7 +16,6 @@ export type ProxyConfig = {
 export type CliOptions = {
   host: string;
   port: number;
-  workspace: string;
   sessionMode: SessionMode;
   agentMode: AgentMode;
   cursorApiKey: string | undefined;
@@ -34,7 +32,6 @@ export function parseArgs(
   const opts: CliOptions = {
     host: "127.0.0.1",
     port: 11434,
-    workspace: process.cwd(),
     sessionMode: "sticky",
     agentMode: "ask",
     cursorApiKey: env.CURSOR_API_KEY?.trim() || undefined,
@@ -61,9 +58,6 @@ export function parseArgs(
         break;
       case "--host":
         opts.host = next();
-        break;
-      case "--workspace":
-        opts.workspace = next();
         break;
       case "--cursor-api-key":
         opts.cursorApiKey = next().trim();
@@ -103,7 +97,6 @@ export function toProxyConfig(opts: CliOptions): ProxyConfig {
   return {
     host: opts.host,
     port: opts.port,
-    workspace: opts.workspace,
     sessionMode: opts.sessionMode,
     agentMode: opts.agentMode,
     auth: key ? { mode: "hosted", cursorApiKey: key } : { mode: "passthrough" },
@@ -114,7 +107,6 @@ export const USAGE = `Usage: cursor-openai-proxy [options]
 
   --port <n>              Listen port (default 11434; 0 = ephemeral)
   --host <addr>           Bind address (default 127.0.0.1)
-  --workspace <path>      Local agent cwd (default process cwd)
   --cursor-api-key <key>  Hosted Cursor API key (else $CURSOR_API_KEY, else passthrough)
   --session-mode <mode>   sticky | prefix (default sticky)
   --agent-mode <mode>     ask | plan | agent (default ask)

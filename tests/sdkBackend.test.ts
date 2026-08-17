@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { describe, expect, it, vi } from "vitest";
 
 // SdkCursorBackend imports Agent + Cursor from @cursor/sdk at module load
@@ -22,7 +23,6 @@ import { SdkCursorBackend } from "../src/cursor/sdkBackend.ts";
 const AGENT_OPTIONS = {
   apiKey: "key",
   model: "baf",
-  workspace: "/tmp",
   mode: "ask" as const,
 };
 
@@ -130,5 +130,73 @@ describe("SdkCursorBackend SDK error mapping", () => {
     vi.mocked(Agent.create).mockRejectedValueOnce(new Error("boom"));
     const backend = new SdkCursorBackend();
     await expect(backend.createAgent(AGENT_OPTIONS)).rejects.toThrow("boom");
+  });
+});
+
+describe("SdkCursorBackend workspace isolation", () => {
+  // The proxy must never let a local agent see the operator's real cwd or
+  // an operator-supplied path -- every agent gets its own fresh, empty temp
+  // directory, unconditionally (not an opt-in flag). These tests exercise
+  // that directly against the mocked `Agent.create` call.
+  //
+  // `Agent.create` is one `vi.fn()` shared across every test in this file
+  // (declared once in the top-level `vi.mock("@cursor/sdk", ...)`), so its
+  // `.mock.calls` history accumulates across describe blocks -- reading
+  // `.mock.calls[0]` here would pick up a call (and since-deleted temp dir)
+  // from an earlier test, not this one. Capture each call's `cwd` directly
+  // in the mock's own implementation closure instead of indexing history.
+  function mockAgent(): { dispose: ReturnType<typeof vi.fn>; getCwd: () => string | undefined } {
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    let cwd: string | undefined;
+    vi.mocked(Agent.create).mockImplementationOnce(
+      async (opts) =>
+        {
+          cwd = opts.local?.cwd;
+          return {
+            agentId: "agent-under-test",
+            [Symbol.asyncDispose]: dispose,
+          } as unknown as Awaited<ReturnType<typeof Agent.create>>;
+        },
+    );
+    return { dispose, getCwd: () => cwd };
+  }
+
+  it("gives the agent a fresh temp dir, never process.cwd(), and removes it on close", async () => {
+    const { getCwd } = mockAgent();
+    const backend = new SdkCursorBackend();
+    const handle = await backend.createAgent(AGENT_OPTIONS);
+
+    const cwd = getCwd();
+    expect(cwd).toBeDefined();
+    expect(cwd).not.toBe(process.cwd());
+    expect(existsSync(cwd!)).toBe(true);
+
+    await handle.close();
+    expect(existsSync(cwd!)).toBe(false);
+  });
+
+  it("gives two agents two different temp dirs", async () => {
+    const first = mockAgent();
+    const second = mockAgent();
+    const backend = new SdkCursorBackend();
+    await backend.createAgent(AGENT_OPTIONS);
+    await backend.createAgent(AGENT_OPTIONS);
+
+    expect(first.getCwd()).toBeDefined();
+    expect(second.getCwd()).toBeDefined();
+    expect(first.getCwd()).not.toBe(second.getCwd());
+  });
+
+  it("removes the temp dir if Agent.create itself fails", async () => {
+    let capturedCwd: string | undefined;
+    vi.mocked(Agent.create).mockImplementationOnce(async (opts) => {
+      capturedCwd = opts.local?.cwd;
+      throw new Error("boom");
+    });
+    const backend = new SdkCursorBackend();
+    await expect(backend.createAgent(AGENT_OPTIONS)).rejects.toThrow("boom");
+
+    expect(capturedCwd).toBeDefined();
+    expect(existsSync(capturedCwd!)).toBe(false);
   });
 });
