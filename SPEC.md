@@ -28,6 +28,13 @@ This version does **not**:
 
 OpenAI **function tools** are in scope (Chat Completions and Responses). See §5.
 
+**Considered, not implemented:** account rotation / load balancing across
+multiple Cursor API keys (spreading requests across several keys an operator
+holds, to avoid rate limits) — unlike the items above, this isn't excluded on
+design or ToS grounds, it's just deferred: there's currently only one Cursor
+key in use, so there's nothing to load-balance across or test against. Revisit
+if a multi-key setup is ever needed.
+
 ---
 
 ## 2. Process model
