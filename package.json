@@ -18,15 +18,15 @@
     "test:e2e:live": "LIVE_SMOKE=1 E2E_SPAWN=1 vitest run tests/e2e.test.ts"
   },
   "dependencies": {
-    "@cursor/sdk": "^1.0.0",
-    "@hono/node-server": "^1.19.0",
+    "@cursor/sdk": "^1.5.0",
+    "@hono/node-server": "^2.1.6",
     "effect": "^3.17.0",
-    "hono": "^4.13.7"
+    "hono": "^4.13.22"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0",
-    "vitest": "^5.0.0"
+    "vitest": "^5.1.2"
   }
 }
